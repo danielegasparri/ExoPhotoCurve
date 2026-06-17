@@ -1,0 +1,6 @@
+PhotoCurve Lab exoplanet transit catalogue
+Source: NASA Exoplanet Archive PSCompPars TAP service
+Generated: 2026-06-09 19:59:12 UTC
+Rows: 4595
+TAP URL: https://exoplanetarchive.ipac.caltech.edu/TAP/sync?query=select+pl_name%2C+hostname%2C+pl_orbper%2C+pl_tranmid%2C+pl_trandur%2C+ra%2C+dec%2C+disc_facility%2C+discoverymethod%2C+pl_tranmid_systemref%2C+pl_trandep%2C+pl_trandeperr1%2C+pl_trandeperr2%2C+pl_ratror%2C+pl_ratrorerr1%2C+pl_ratrorerr2%2C+pl_orbpererr1%2C+pl_orbpererr2%2C+pl_tranmiderr1%2C+pl_tranmiderr2%2C+pl_trandurerr1%2C+pl_trandurerr2%2C+pl_ratdor%2C+pl_ratdorerr1%2C+pl_ratdorerr2%2C+pl_orbincl%2C+pl_orbinclerr1%2C+pl_orbinclerr2%2C+pl_orbeccen%2C+pl_orbeccenerr1%2C+pl_orbeccenerr2%2C+pl_orblper%2C+pl_orblpererr1%2C+pl_orblpererr2%2C+st_teff%2C+st_tefferr1%2C+st_tefferr2%2C+st_logg%2C+st_loggerr1%2C+st_loggerr2%2C+st_met%2C+st_meterr1%2C+st_meterr2+from+pscomppars+where+tran_flag+%3D+1+and+pl_orbper+is+not+null+and+pl_tranmid+is+not+null+and+pl_trandur+is+not+null+and+%28pl_trandep+is+not+null+or+pl_ratror+is+not+null%29+order+by+pl_name&format=csv
+Depth convention: depth_ppt stores published pl_trandep where available; model_depth_ppt uses Rp/Rs^2 when Rp/Rs is available for internal consistency.

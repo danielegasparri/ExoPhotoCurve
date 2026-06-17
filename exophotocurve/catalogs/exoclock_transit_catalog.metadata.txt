@@ -1,0 +1,10 @@
+PhotoCurve Lab ExoClock transit catalogue
+Source: ExoClock planets_json endpoint
+Endpoint: https://www.exoclock.space/database/planets_json
+Generated: 2026-06-10 21:33:29 UTC
+Rows: 776
+Rows with a/Rs and inclination for batman: 725
+Supplement catalogue: C:\Users\danie\Desktop\plot transiti finali topcat\dati\photocurve_lab_v04_13_1_model_depth_report_fix\photocurve_lab_project\photocurve_lab\catalogs\exoplanet_transit_catalog.csv
+Supplemented rows: 770
+Depth convention: depth_mmag was converted to relative flux depth in ppt using depth = 1 - 10^(-depth_mmag/2500).
+Important: ExoClock currently supplies ephemerides, duration, depth and coordinates, but not all geometric parameters used by batman. Use a NASA-style supplement catalogue or manually curated rows to obtain physical-model fits for more targets.

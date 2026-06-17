@@ -1,0 +1,78 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "exophotocurve"
+version = "1.0.0"
+description = "A graphical tool for aperture photometry, light-curve analysis and exoplanet transit diagnostics."
+requires-python = ">=3.10"
+readme = "README.md"
+license = {text = """
+EPC License
+
+1. This software is licensed for non-commercial, academic and personal use only.
+2. The source code may be used and modified for research and educational purposes, 
+   but any modifications must remain for private use unless explicitly authorized 
+   in writing by the original author.
+3. Redistribution of the software in its original, unmodified form is permitted 
+   for non-commercial purposes, provided that this license notice is always included.
+4. Redistribution or public release of modified versions of the source code 
+   is prohibited without prior written permission from the author.
+5. Any user of this software must properly attribute the original author 
+   in any academic work, research, or derivative project.
+6. Commercial use of this software is strictly prohibited without prior 
+   written permission from the author.
+
+DISCLAIMER:
+THIS SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE, AND NON-INFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES, OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT, OR OTHERWISE, ARISING FROM, OUT OF, OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+© Daniele Gasparri - 2026
+"""}
+
+authors = [
+  { name = "Daniele Gasparri", email = "daniele.gasparri@gmail.com" }
+]
+keywords = [
+    "astronomy",
+    "photometry",
+    "exoplanets",
+    "transits",
+    "light curves",
+    "aperture photometry"
+]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "License :: Free for non-commercial use",
+  "Operating System :: OS Independent",
+  "Topic :: Scientific/Engineering :: Astronomy",
+  "Intended Audience :: Science/Research"
+]
+
+dependencies = [
+    "numpy",
+    "pandas",
+    "matplotlib",
+    "scipy",
+    "astropy",
+    "astropy-iers-data",
+    "batman-package"
+]
+
+# [project.urls]
+# Homepage = "https://github.com/USERNAME/photocurve-lab"
+# Repository = "https://github.com/USERNAME/photocurve-lab"
+# Issues = "https://github.com/USERNAME/photocurve-lab/issues"
+
+[tool.setuptools]
+include-package-data = true
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["exophotocurve*"]
+
+[tool.setuptools.package-data]
+"exophotocurve" = ["**/*"]
+
+[project.scripts]
+exophotocurve = "exophotocurve.main:main"

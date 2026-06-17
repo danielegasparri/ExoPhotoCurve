@@ -1,4 +1,4 @@
-# ExoPhotoCurve -- EPC
+# ExoPhotoCurve -- EPC v1.0.0
 
 📖 **Author:** Daniele Gasparri  
 📅 **Latest Release:** June 2026  

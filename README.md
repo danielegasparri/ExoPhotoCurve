@@ -3,6 +3,9 @@
 📖 **Author:** Daniele Gasparri  
 📅 **Latest Release:** June 2026  
 
+![Python Version](https://img.shields.io/badge/python-3.10%2B-blue)
+[![License](https://img.shields.io/badge/license-Non--Commercial-blue)](./LICENSE)
+
 **ExoPhotoCurve is a GUI program designed to create, inspect, correct, analyse and model photometric light curves of known exoplanet transits. It is particularly suited for follow-up observations and fast modeling using the embedded NASA and ExoClock catalogues**
 
 <img width="1841" height="919" alt="Screenshot 2026-06-17 191802" src="https://github.com/user-attachments/assets/2705c839-af44-40ac-9f72-b3684a8bebad" />

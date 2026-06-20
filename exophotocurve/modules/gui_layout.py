@@ -421,7 +421,7 @@ def make_layout() -> List[List[sg.Element]]:
             sg.Input("0.5", key="-COMP_IMPROVE_THRESHOLD-", size=(5, 1), disabled=True),
         ],
         [
-            sg.Checkbox("Send optimised curve to Data/Transit", default=True, key="-COMP_SEND_TO_DATA-", disabled=True, tooltip='This will be the new light curve to analyze'),
+            sg.Checkbox("Send optimized curve to Data/Transit", default=True, key="-COMP_SEND_TO_DATA-", disabled=True, tooltip='This will be the new light curve to analyze'),
             sg.Checkbox("Show popup", default=True, key="-COMP_SHOW_POPUP-", disabled=True, tooltip='Showing a pop-up window with the results once you press Run comp optimizer'), sg.Button("Run comp optimizer", disabled=True, tooltip='Run the automatic optimisation for choosing the best set of comparison stars'),
         ],
         [sg.HorizontalSeparator(pad=(0, 8))],

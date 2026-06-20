@@ -33,6 +33,7 @@ import os
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
+import ctypes
 
 import numpy as np
 import pandas as pd
@@ -1107,9 +1108,9 @@ def build_reproducibility_recipe(
 
     lines.append("Comparison-star stage")
     if aij_flux_detection is None:
-        lines.append("AIJ raw flux columns detected: not checked")
+        lines.append("Raw flux columns detected: not checked")
     else:
-        lines.append(f"AIJ raw flux columns detected: {_yes_no(aij_flux_detection.compatible)}")
+        lines.append(f"Raw flux columns detected: {_yes_no(aij_flux_detection.compatible)}")
         if aij_flux_detection.compatible:
             lines.append(f"Detected targets: {_compact_list(aij_flux_detection.target_ids)}")
             lines.append(f"Detected comparison stars: {_compact_list(aij_flux_detection.comparison_ids)}")
@@ -1624,7 +1625,7 @@ def update_comparison_tab(window: sg.Window, detection: Optional[AijFluxDetectio
     try:
         target_value = detection.target_ids[0] if detection.target_ids else ""
         window["-COMP_STATUS-"].update(
-            f"AIJ raw fluxes detected: {len(detection.target_ids)} target-like star(s), "
+            f"Raw fluxes detected: {len(detection.target_ids)} target-like star(s), "
             f"{len(detection.comparison_ids)} comparison star(s). Optimiser active.",
             text_color="darkgreen",
         )
@@ -2058,17 +2059,60 @@ def add_transit_diagnostic_columns(
     return pd.concat([base, diagnostic_columns], axis=1).copy()
 
 
+
+
 def main() -> None:
     """Run the GUI."""
     sg.theme("SystemDefault")
 
-    window = sg.Window(
-        "ExoPhotoCurve - Exoplanet transit lightcurve diagnostics and analysis - Daniele Gasparri",
-        make_layout(),
-        resizable=True,
-        finalize=True,
-        icon=icon_path,
-    )
+    # Handling the extreme scaling (>150%) on Windows systems
+    if os.name == "nt":
+        
+        # Keep DPI awareness on Windows for crisp rendering
+        try:
+            ctypes.windll.shcore.SetProcessDpiAwareness(2)
+            ctypes.windll.user32.SetProcessDPIAware()
+        except Exception:
+            pass
+
+        # OS-reported scale used only as initial HINT
+        try:
+            dpi_scale = ctypes.windll.shcore.GetScaleFactorForDevice(0) / 100.0
+        except Exception:
+            dpi_scale = 1.0
+
+        # If OS scale < 1.5, start from 1.5 as a comfortable default
+        scale_win = 1.3 if dpi_scale < 1.5 else float(dpi_scale)
+
+        if dpi_scale < 1.5:
+            window = sg.Window(
+                "ExoPhotoCurve - Exoplanet transit lightcurve diagnostics and analysis - Daniele Gasparri",
+                make_layout(),
+                resizable=True,
+                finalize=True,
+                icon=icon_path,
+            )
+        else:
+            window = sg.Window(
+                "ExoPhotoCurve - Exoplanet transit lightcurve diagnostics and analysis - Daniele Gasparri",
+                make_layout(),
+                resizable=True,
+                finalize=True,
+                icon=icon_path,
+                scaling =scale_win,
+            )   
+
+        #Mouse over button on Windows
+        misc.enable_hover_effect(window)
+
+    else:
+        window = sg.Window(
+            "ExoPhotoCurve - Exoplanet transit lightcurve diagnostics and analysis - Daniele Gasparri",
+            make_layout(),
+            resizable=True,
+            finalize=True,
+            icon=icon_path,
+        )
     center_window(window)
     df: Optional[pd.DataFrame] = None
     original_df: Optional[pd.DataFrame] = None
@@ -2109,19 +2153,6 @@ def main() -> None:
     update_detrending_tab(window, None)
     update_detrend_fit_model_control(window, None, None)
     update_manual_point_controls(window, manual_reject_indices, manual_keep_indices)
-
-    #Handling windows peculiarities: DPI awareness and mouse over buttons
-    # current_os =   # 'posix' for Linux/Mac, 'nt' for Windows
-
-    if os.name == "nt":
-        misc.enable_hover_effect(window)
-        # Keep DPI awareness on Windows for crisp rendering
-        import ctypes
-        try:
-            ctypes.windll.shcore.SetProcessDpiAwareness(2)
-            ctypes.windll.user32.SetProcessDPIAware()
-        except Exception:
-            pass
         
     while True:
         event, values = window.read()

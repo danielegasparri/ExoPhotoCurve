@@ -50,19 +50,19 @@ classifiers = [
 ]
 
 dependencies = [
-    "numpy",
-    "pandas",
-    "matplotlib",
-    "scipy",
-    "astropy",
+    "numpy>=1.24.1",
+    "pandas>=2.2.3, <3.0.0",
+    "matplotlib>=3.10.0",
+    "scipy>=1.15.0",
+    "astropy>=6.1.0",
     "astropy-iers-data",
     "batman-package"
 ]
 
-# [project.urls]
-# Homepage = "https://github.com/USERNAME/photocurve-lab"
-# Repository = "https://github.com/USERNAME/photocurve-lab"
-# Issues = "https://github.com/USERNAME/photocurve-lab/issues"
+[project.urls]
+Homepage = "https://github.com/danielegasparri/exophotocurve"
+Repository = "https://github.com/danielegasparri/exophotocurve/issues"
+Issues = "https://github.com/danielegasparri/exophotocurve/issues"
 
 [tool.setuptools]
 include-package-data = true

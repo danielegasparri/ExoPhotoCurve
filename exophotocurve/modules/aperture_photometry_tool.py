@@ -355,7 +355,7 @@ def _peak_quality_from_stats(peak_median: float, peak_max: float, values: Option
 
 
 def _peak_quality_style(quality: str) -> Tuple[str, str, str]:
-    """Return text label, Matplotlib colour and GUI background colour."""
+    """Return text label, Matplotlib color and GUI background color."""
     quality = str(quality or "unknown").lower()
     if quality == "ok":
         return "OK", "limegreen", "#d8f5d0"
@@ -504,6 +504,264 @@ def _update_peak_quality_from_table(session: PhotometrySession, table: pd.DataFr
         star.peak_max = float(np.nanmax(peaks))
         star.peak_quality = _peak_quality_from_stats(star.peak_median, star.peak_max, values)
         star.peak_source = "full sequence"
+
+
+
+def _distance_to_positions(x: float, y: float, positions: Sequence[Tuple[float, float]]) -> float:
+    """Return the minimum distance from a point to a list of positions."""
+    if not positions:
+        return math.inf
+    return float(min(math.hypot(float(px) - x, float(py) - y) for px, py in positions))
+
+
+def _auto_candidate_score(
+    x: float,
+    y: float,
+    peak: float,
+    image_shape: Tuple[int, int],
+    values: Dict[str, object],
+    nearest_distance: float,
+) -> float:
+    """Return a ranking score for an automatic comparison-star candidate.
+
+    Lower scores are better.  The ranking favours stars whose peak is near the
+    center of the recommended range, stars far from other selected/candidate
+    apertures, and stars safely away from the image borders.
+    """
+    _sat, _lf, _hf, low_peak, high_peak = _peak_feedback_thresholds(values)
+    peak_mid = 0.5 * (low_peak + high_peak)
+    peak_half_width = max(0.5 * (high_peak - low_peak), 1.0)
+    peak_term = abs(float(peak) - peak_mid) / peak_half_width
+
+    ny, nx = image_shape
+    edge_distance = min(float(x), float(y), float(nx - 1) - float(x), float(ny - 1) - float(y))
+    edge_term = 1.0 / max(edge_distance, 1.0)
+    isolation_term = 1.0 / max(float(nearest_distance), 1.0)
+    return float(peak_term + 8.0 * isolation_term + 20.0 * edge_term)
+
+
+def _auto_find_comparison_stars(window: sg.Window, session: PhotometrySession, values: Dict[str, object]) -> None:
+    """Automatically add candidate comparison stars from the current FITS image.
+
+    ``max`` is treated as the desired maximum total number of comparison-like
+    stars in the aperture list, not as the number of raw candidates to try in a
+    single click.  The function therefore keeps testing replacement candidates
+    internally until the requested total is reached or no valid candidates are
+    left.  This avoids the previous behaviour where the user had to press
+    ``Auto find comps`` several times because some initially selected candidates
+    were rejected only after the sampled sequence peak check.
+    """
+    if session.image is None:
+        raise ValueError("Load a FITS sequence first.")
+    if not any(star.role == "target" for star in session.stars):
+        raise ValueError("Select the target first. Auto-comparison search uses the target aperture as an exclusion zone.")
+
+    requested_total = parse_int(values.get("-PHOTO_AUTO_MAX_COMPS-", 15), 15)
+    requested_total = max(1, int(requested_total))
+    current_comp_count = sum(1 for star in session.stars if star.role in ("comparison", "check") or star.star_id.upper().startswith("C"))
+    slots_to_fill = max(0, requested_total - current_comp_count)
+    if slots_to_fill <= 0:
+        window["-PHOTO_REPORT-"].update(
+            (
+                "Automatic comparison-star search skipped.\n"
+                f"Requested maximum comparison stars: {requested_total}\n"
+                f"Existing comparison/check stars: {current_comp_count}\n"
+                "No additional comparison stars are needed.\n"
+            ),
+            append=True,
+        )
+        return
+
+    aperture_radius = parse_float(values.get("-PHOTO_APER_R-", 6.0), 6.0)
+    sky_outer = parse_float(values.get("-PHOTO_SKY_OUT-", 16.0), 16.0)
+    search_radius = parse_float(values.get("-PHOTO_SEARCH_R-", 8.0), 8.0)
+    min_distance = parse_float(values.get("-PHOTO_AUTO_MIN_DIST-", 0.0), 0.0)
+    if not np.isfinite(min_distance) or min_distance <= 0:
+        min_distance = max(3.0 * aperture_radius, 1.25 * sky_outer, 18.0)
+    edge_margin = max(float(sky_outer) + 5.0, float(aperture_radius) + 8.0)
+
+    _sat, _low_frac, _high_frac, low_peak, high_peak = _peak_feedback_thresholds(values)
+    image = np.asarray(session.image, dtype=float)
+    ny, nx = image.shape
+    if nx <= 2 * edge_margin or ny <= 2 * edge_margin:
+        raise ValueError("The image is too small for the current aperture/sky annulus and edge margin.")
+
+    finite = np.isfinite(image)
+    y_indices, x_indices = np.nonzero(finite & (image >= low_peak) & (image <= high_peak))
+    if x_indices.size == 0:
+        raise ValueError("No pixels in the current image fall inside the selected OK peak range.")
+
+    peaks = image[y_indices, x_indices]
+    # Keep enough bright pixels to build a generous candidate pool.  Validation
+    # is done later, before any star is added, so a larger pool is needed to
+    # replace candidates rejected by the sequence peak check in the same click.
+    max_pixels_to_consider = min(int(peaks.size), max(6000, requested_total * 3500))
+    if peaks.size > max_pixels_to_consider:
+        top_idx = np.argpartition(peaks, -max_pixels_to_consider)[-max_pixels_to_consider:]
+        order_local = top_idx[np.argsort(peaks[top_idx])[::-1]]
+    else:
+        order_local = np.argsort(peaks)[::-1]
+
+    existing_positions = [(float(star.x), float(star.y)) for star in session.stars]
+    provisional_positions: List[Tuple[float, float]] = []
+    candidates: List[Tuple[float, float, float, float]] = []
+    max_raw_candidates = max(200, min(600, requested_total * 40))
+
+    for idx in order_local:
+        x0 = float(x_indices[idx])
+        y0 = float(y_indices[idx])
+        if x0 < edge_margin or x0 > nx - 1 - edge_margin or y0 < edge_margin or y0 > ny - 1 - edge_margin:
+            continue
+        if _distance_to_positions(x0, y0, existing_positions) < min_distance:
+            continue
+        if _distance_to_positions(x0, y0, provisional_positions) < min_distance:
+            continue
+
+        cx, cy = _centroid_near(image, x0, y0, search_radius)
+        if cx < edge_margin or cx > nx - 1 - edge_margin or cy < edge_margin or cy > ny - 1 - edge_margin:
+            continue
+        if _distance_to_positions(cx, cy, existing_positions) < min_distance:
+            continue
+        if _distance_to_positions(cx, cy, provisional_positions) < min_distance:
+            continue
+
+        _pixel, peak, _mean = _aperture_stats_at(image, cx, cy, aperture_radius)
+        if _peak_quality_from_value(peak, values) != "ok":
+            continue
+
+        nearest = min(_distance_to_positions(cx, cy, existing_positions), _distance_to_positions(cx, cy, provisional_positions))
+        if not np.isfinite(nearest):
+            nearest = min_distance
+        score = _auto_candidate_score(cx, cy, peak, image.shape, values, nearest)
+        candidates.append((score, float(cx), float(cy), float(peak)))
+        provisional_positions.append((float(cx), float(cy)))
+        if len(candidates) >= max_raw_candidates:
+            break
+
+    if not candidates:
+        raise ValueError("No suitable comparison-star candidates were found in the current image.")
+
+    candidates.sort(key=lambda row: row[0])
+
+    # Validate the whole candidate pool using the same sampled-frame idea used
+    # by Check peaks, but without adding/removing stars repeatedly.  Each FITS
+    # image is read once and all candidates are tested on that image.
+    n_peak_frames = parse_int(values.get("-PHOTO_PEAK_MAX_FRAMES-", 15), 15)
+    sample_indices = _sample_frame_indices(len(session.files), int(n_peak_frames)) if session.files else []
+    if not sample_indices:
+        sample_indices = [session.current_index]
+
+    recenter = bool(values.get("-PHOTO_RECENTER-", True))
+    peaks_by_candidate: List[List[float]] = [[] for _ in candidates]
+    valid_candidate = [True for _ in candidates]
+
+    n_indices = len(sample_indices)
+    for count, file_index in enumerate(sample_indices, start=1):
+        try:
+            sample_image, _header = _read_fits_image(session.files[file_index]) if session.files else (image, None)
+        except Exception:
+            continue
+        for cand_idx, (_score, cx0, cy0, _peak0) in enumerate(candidates):
+            if not valid_candidate[cand_idx]:
+                # A high candidate is already rejected; still skip it to keep the
+                # validation pass responsive on large fields.
+                continue
+            x = float(cx0)
+            y = float(cy0)
+            if recenter:
+                x, y = _centroid_near(sample_image, x, y, search_radius)
+            _pixel, peak, _mean = _aperture_stats_at(sample_image, x, y, aperture_radius)
+            if not np.isfinite(peak):
+                valid_candidate[cand_idx] = False
+                continue
+            peaks_by_candidate[cand_idx].append(float(peak))
+            # A single frame above the high limit is enough to reject a star as
+            # potentially non-linear/saturated.
+            if peak > high_peak:
+                valid_candidate[cand_idx] = False
+        try:
+            window["-PHOTO_PROGRESS-"].update(int(count / max(1, n_indices) * 100.0))
+            if count % 3 == 0:
+                window.refresh()
+        except Exception:
+            pass
+
+    accepted_rows: List[Tuple[float, float, float, float, float, str]] = []
+    rejected_high = 0
+    rejected_low = 0
+    rejected_unknown = 0
+    for cand_idx, (score, cx, cy, current_peak) in enumerate(candidates):
+        peaks_for_candidate = peaks_by_candidate[cand_idx]
+        if not peaks_for_candidate:
+            rejected_unknown += 1
+            continue
+        peak_median = float(np.nanmedian(peaks_for_candidate))
+        peak_max = float(np.nanmax(peaks_for_candidate))
+        quality = _peak_quality_from_stats(peak_median, peak_max, values)
+        if not valid_candidate[cand_idx] or quality == "high":
+            rejected_high += 1
+            continue
+        if quality == "low":
+            rejected_low += 1
+            continue
+        if quality != "ok":
+            rejected_unknown += 1
+            continue
+        accepted_rows.append((score, cx, cy, peak_median, peak_max, "sampled sequence"))
+
+    added_ids: List[str] = []
+    occupied = list(existing_positions)
+    skipped_distance_after_validation = 0
+    for _score, cx, cy, peak_median, peak_max, source in accepted_rows:
+        if len(added_ids) >= slots_to_fill:
+            break
+        if _distance_to_positions(cx, cy, occupied) < min_distance:
+            skipped_distance_after_validation += 1
+            continue
+        star = _add_star(session, cx, cy, "comparison")
+        star.peak_median = float(peak_median)
+        star.peak_max = float(peak_max)
+        star.peak_quality = _peak_quality_from_stats(star.peak_median, star.peak_max, values)
+        star.peak_source = source
+        added_ids.append(star.star_id)
+        occupied.append((cx, cy))
+
+    try:
+        window["-PHOTO_PROGRESS-"].update(0)
+    except Exception:
+        pass
+
+    if not added_ids:
+        raise ValueError(
+            "Candidate stars were detected, but none passed the sampled peak validation and distance filters. "
+            "Try widening the OK fraction range, increasing the saturation/non-linearity level if appropriate, "
+            "or reducing the minimum distance."
+        )
+
+    _update_star_list(window, session)
+    _refresh_star_overlays(window, session, values)
+
+    mode = "full sequence" if len(sample_indices) >= len(session.files) else f"sample {len(sample_indices)}/{len(session.files)} frames"
+    final_total = current_comp_count + len(added_ids)
+    report = [
+        "Automatic comparison-star search complete.",
+        f"Requested maximum comparison stars: {requested_total}",
+        f"Existing comparison/check stars before search: {current_comp_count}",
+        f"Additional slots requested: {slots_to_fill}",
+        f"Raw candidates detected on current image: {len(candidates)}",
+        f"Valid candidates after peak check: {len(accepted_rows)}",
+        f"Candidates added in this click: {len(added_ids)}",
+        f"Final comparison/check stars: {final_total}",
+        f"Rejected as HIGH in sampled frames: {rejected_high}",
+        f"Rejected as LOW in sampled frames: {rejected_low}",
+        f"Rejected/unknown peak check: {rejected_unknown}",
+        f"Skipped by final distance check: {skipped_distance_after_validation}",
+        f"Peak validation: {mode}",
+        f"Peak OK range: {low_peak:.0f} - {high_peak:.0f} ADU",
+        f"Minimum separation used: {min_distance:.1f} px",
+        "These are candidate comparison stars; inspect their light curves in the main Comp stars tab before final analysis.",
+    ]
+    window["-PHOTO_REPORT-"].update("\n".join(report) + "\n", append=True)
 
 def _robust_sky_std(values: np.ndarray) -> float:
     """Return a robust sky scatter estimate."""
@@ -713,7 +971,7 @@ def _star_list_labels(session: PhotometrySession) -> List[str]:
         role = star.role
         if role == "check":
             role = "check/C"
-        quality_label, _colour, _bg = _peak_quality_style(getattr(star, "peak_quality", "unknown"))
+        quality_label, _color, _bg = _peak_quality_style(getattr(star, "peak_quality", "unknown"))
         peak_med = getattr(star, "peak_median", math.nan)
         peak_max = getattr(star, "peak_max", math.nan)
         source = str(getattr(star, "peak_source", "not checked") or "not checked")
@@ -797,8 +1055,8 @@ def _draw_embedded_figure(canvas_elem: sg.Canvas, figure: Figure) -> FigureCanva
     return canvas_agg
 
 
-def _star_colour(star: ApertureStar) -> str:
-    """Return a high-contrast display colour for an aperture role."""
+def _star_color(star: ApertureStar) -> str:
+    """Return a high-contrast display color for an aperture role."""
     if star.role == "target":
         return "tab:red"
     if star.role == "check":
@@ -806,22 +1064,22 @@ def _star_colour(star: ApertureStar) -> str:
     return "tab:orange"
 
 
-def _star_display_colour(star: ApertureStar) -> str:
-    """Return diagnostic colour when peak feedback is available."""
+def _star_display_color(star: ApertureStar) -> str:
+    """Return diagnostic color when peak feedback is available."""
     quality = str(getattr(star, "peak_quality", "unknown") or "unknown").lower()
     if quality != "unknown":
-        _label, colour, _bg = _peak_quality_style(quality)
-        return colour
-    return _star_colour(star)
+        _label, color, _bg = _peak_quality_style(quality)
+        return color
+    return _star_color(star)
 
 
-def _update_hover_overlay(window: sg.Window, session: PhotometrySession, values: Dict[str, object], x: float, y: float, colour: str = "lime") -> None:
+def _update_hover_overlay(window: sg.Window, session: PhotometrySession, values: Dict[str, object], x: float, y: float, color: str = "lime") -> None:
     """Draw or update the live aperture preview under the mouse cursor.
 
     The first implementation removed and recreated three Matplotlib patches at
     every mouse-motion event.  On large FITS images this was CPU-heavy and made
     the preview lag behind the cursor.  Here the hover patches are created once
-    and only their centre/radius/visibility are updated.
+    and only their center/radius/visibility are updated.
     """
     if session.ax is None or session.figure_agg is None or session.image is None:
         return
@@ -837,9 +1095,9 @@ def _update_hover_overlay(window: sg.Window, session: PhotometrySession, values:
             except Exception:
                 pass
         session.hover_artists = [
-            Circle((0.0, 0.0), aper, fill=False, lw=1.8, ec=colour, alpha=0.95),
-            Circle((0.0, 0.0), sky_in, fill=False, lw=1.0, ls="--", ec=colour, alpha=0.70),
-            Circle((0.0, 0.0), sky_out, fill=False, lw=1.0, ls=":", ec=colour, alpha=0.70),
+            Circle((0.0, 0.0), aper, fill=False, lw=1.8, ec=color, alpha=0.95),
+            Circle((0.0, 0.0), sky_in, fill=False, lw=1.0, ls="--", ec=color, alpha=0.70),
+            Circle((0.0, 0.0), sky_out, fill=False, lw=1.0, ls=":", ec=color, alpha=0.70),
         ]
         for artist in session.hover_artists:
             session.ax.add_patch(artist)
@@ -850,7 +1108,7 @@ def _update_hover_overlay(window: sg.Window, session: PhotometrySession, values:
             artist.center = (float(x), float(y))
             artist.radius = float(radius)
             artist.set_visible(visible)
-            artist.set_edgecolor(colour)
+            artist.set_edgecolor(color)
         except Exception:
             pass
 
@@ -882,8 +1140,8 @@ def _zoom_image(session: PhotometrySession, x: float, y: float, step: float) -> 
         pass
 
 
-def _zoom_image_centre(session: PhotometrySession, step: float) -> None:
-    """Zoom around the centre of the current displayed image."""
+def _zoom_image_center(session: PhotometrySession, step: float) -> None:
+    """Zoom around the center of the current displayed image."""
     if session.ax is None:
         return
     xlim = session.ax.get_xlim()
@@ -997,7 +1255,7 @@ def _draw_star_overlays(
     sky_in = float(sky_inner_radius)
     sky_out = float(sky_outer_radius)
     for star in session.stars:
-        colour = _star_display_colour(star)
+        color = _star_display_color(star)
         if star.role == "target":
             line_width = 2.2
             label = star.star_id
@@ -1007,16 +1265,16 @@ def _draw_star_overlays(
         else:
             line_width = 1.6
             label = star.star_id
-        patch_ap = Circle((star.x, star.y), aper, fill=False, lw=line_width, ec=colour, alpha=0.98)
-        patch_in = Circle((star.x, star.y), sky_in, fill=False, lw=1.0, ls="--", ec=colour, alpha=0.80)
-        patch_out = Circle((star.x, star.y), sky_out, fill=False, lw=1.0, ls=":", ec=colour, alpha=0.80)
+        patch_ap = Circle((star.x, star.y), aper, fill=False, lw=line_width, ec=color, alpha=0.98)
+        patch_in = Circle((star.x, star.y), sky_in, fill=False, lw=1.0, ls="--", ec=color, alpha=0.80)
+        patch_out = Circle((star.x, star.y), sky_out, fill=False, lw=1.0, ls=":", ec=color, alpha=0.80)
         txt = session.ax.text(
             star.x + aper + 2.0,
             star.y + aper + 2.0,
             label,
             fontsize=8,
             weight="bold",
-            color=colour,
+            color=color,
             bbox={"facecolor": "black", "alpha": 0.35, "edgecolor": "none", "pad": 1.0},
         )
         for artist in (patch_ap, patch_in, patch_out):
@@ -1202,7 +1460,7 @@ def _connect_image_events(window: sg.Window, session: PhotometrySession) -> None
             window.write_event_value("-PHOTO_IMAGE_SCROLL-", direction)
             return
         if event.xdata is None or event.ydata is None:
-            _zoom_image_centre(session, step)
+            _zoom_image_center(session, step)
         else:
             _zoom_image(session, float(event.xdata), float(event.ydata), step)
 
@@ -1213,9 +1471,9 @@ def _connect_image_events(window: sg.Window, session: PhotometrySession) -> None
         elif key in ("left", "up", "pageup"):
             window.write_event_value("-PHOTO_IMAGE_SCROLL-", 1)
         elif key in ("+", "=", "plus"):
-            _zoom_image_centre(session, 1.0)
+            _zoom_image_center(session, 1.0)
         elif key in ("-", "minus", "_"):
-            _zoom_image_centre(session, -1.0)
+            _zoom_image_center(session, -1.0)
         elif key in ("f", "home"):
             window.write_event_value("-PHOTO_FIT_VIEW-", None)
 
@@ -1232,12 +1490,12 @@ def _build_layout() -> List[List[sg.Element]]:
         [
             sg.Text("FITS folder", size=(12, 1)),
             sg.Input("", key="-PHOTO_FOLDER-", size=(36, 1)),
-            sg.FolderBrowse("Browse"),
+            sg.FolderBrowse("Browse", tooltip='Set the folder containing your image sequence.\nThe sequence MUST be already calibrated with dark, flat, bias and the frames aligned.\nfit(s) files are required'),
         ],
         [
             sg.Text("Pattern", size=(9, 1)),
             sg.Input("*.fit*", key="-PHOTO_PATTERN-", size=(12, 1)),
-            sg.Button("Load sequence"),
+            sg.Button("Load sequence", tooltip='Load the browsed sequence here'),
             sg.Text("Image"),
             sg.Button("<", key="-PHOTO_PREV-"),
             sg.Text("0/0", key="-PHOTO_INDEX-", size=(8, 1)),
@@ -1247,7 +1505,7 @@ def _build_layout() -> List[List[sg.Element]]:
 
     aperture_frame = [
         [
-            sg.Text("Aperture", size=(10, 1)),
+            sg.Text("Aperture", size=(10, 1), tooltip='Set the aperture sizes here: inner radius, inner sky annulus, outer sky annulus.\nYou can change these values even after you set the apertures on the stars\nYou will see the changes in size in real time in the plot'),
             sg.Input("11", key="-PHOTO_APER_R-", size=(6, 1), enable_events=True),
             sg.Text("Sky in"),
             sg.Input("19", key="-PHOTO_SKY_IN-", size=(6, 1), enable_events=True),
@@ -1255,45 +1513,53 @@ def _build_layout() -> List[List[sg.Element]]:
             sg.Input("31", key="-PHOTO_SKY_OUT-", size=(6, 1), enable_events=True),
         ],
         [
-            sg.Checkbox("Snap click", default=True, key="-PHOTO_SNAP_CLICK-"),
-            sg.Checkbox("Recentre frames", default=True, key="-PHOTO_RECENTER-"),
+            sg.Checkbox("Snap click", default=True, key="-PHOTO_SNAP_CLICK-", tooltip='Snap to the centroid of the selected star in the reference image'),
+            sg.Checkbox("Recenter frames", default=True, key="-PHOTO_RECENTER-", tooltip='Recenter to the centroid any aperture, for any image of the sequence'),
             sg.Text("search"),
             sg.Input("8", key="-PHOTO_SEARCH_R-", size=(5, 1)),
             sg.Text("sat/nonlin"),
             sg.Input("60000", key="-PHOTO_SAT_LEVEL-", size=(7, 1), enable_events=True),
         ],
         [
-            sg.Text("OK frac"),
+            sg.Text("OK frac", tooltip='Min and max fraction of the saturation level to consider good the luminosity of the stars'),
             sg.Input("0.25", key="-PHOTO_PEAK_LOW_FRAC-", size=(5, 1), enable_events=True),
             sg.Input("0.66", key="-PHOTO_PEAK_HIGH_FRAC-", size=(5, 1), enable_events=True),
-            sg.Text("Peak frames"),
+            sg.Text("Peak frames", tooltip='The number of frames of the sequence used to calculate the luminosity leveld of the selected stars\nand the automatic detection of the comparison stars\nSet zero to sample the whole sequence'),
             sg.Input("15", key="-PHOTO_PEAK_MAX_FRAMES-", size=(5, 1)),
-            sg.Button("Check peaks", key="-PHOTO_CHECK_PEAKS-"),
+            sg.Button("Check peaks", key="-PHOTO_CHECK_PEAKS-", tooltip='When you move the mouse over the stars on the right, the apertures will change colors\nYellow = star too faint, Green = star with good luminosity, Red = possibly saturated star\nWhen you select a star, the aperture will maintain it''s color. This color feedback is given considering only the image you are displaying\nThis button extends the luminosity analysis to a subsample (15 by default) of images.\nIt is important to check that the stars you have selected have the right luminosity\nAfter selecting the target and all the comparison stars you want, press this button to see if some of them are not suitable foro photometry\nSet zero to extend the luminosity analysis to the whole sequence'),
+        ],
+        [
+            sg.Button("Auto find comps", key="-PHOTO_AUTO_FIND_COMPS-", tooltip='Automatic algorithm to select the preliminary sample of suitable comparison stars.\nSuitable stars will have the peak luminosity within the OK fraction set above\nare not contaminated by other stars and will not contain other bright stars in the sky mearurement annulus\nThis preliminary sample will be fine-tuned in the main program, in the Comp stars tab'),
+            sg.Text("max", tooltip='Maximum number of comparison stars found by the Auto find comps algorithm'),
+            sg.Input("15", key="-PHOTO_AUTO_MAX_COMPS-", size=(5, 1)),
+            sg.Text("min dist", tooltip='Minimum distance, in pixel, bewteen two stars to be considered eligible by the Auto find comp algorithm.\n Leave zero to automatic selection'),
+            sg.Input("0", key="-PHOTO_AUTO_MIN_DIST-", size=(5, 1)),
+            sg.Text("0 = auto", text_color="gray"),
         ],
         [
             sg.Text("Star type", size=(10, 1)),
-            sg.Radio("Target", "PHOTO_MODE", key="-PHOTO_MODE_TARGET-", default=True),
-            sg.Radio("Comparison", "PHOTO_MODE", key="-PHOTO_MODE_COMP-"),
-            sg.Radio("Check", "PHOTO_MODE", key="-PHOTO_MODE_CHECK-"),
-            sg.Radio("Delete", "PHOTO_MODE", key="-PHOTO_MODE_DELETE-"),
+            sg.Radio("Target", "PHOTO_MODE", key="-PHOTO_MODE_TARGET-", default=True, tooltip='Set the aperture to your target. Only one\nThis is required also if you want to use the automatic detection of comparison stars'),
+            sg.Radio("Comparison", "PHOTO_MODE", key="-PHOTO_MODE_COMP-", tooltip='Set the apertures to comparison stars, if you prefer the manual mode.\nYou can select as many stars as you want'),
+            sg.Radio("Check", "PHOTO_MODE", key="-PHOTO_MODE_CHECK-", tooltip='If you want to add also a check star. Optional, and often not useful'),
+            sg.Radio("Delete", "PHOTO_MODE", key="-PHOTO_MODE_DELETE-", tooltip='To manually delete any aperture you want directly on the plot'),
         ],
         [
-            sg.Button("Delete selected", key="-PHOTO_DELETE_SELECTED-"),
-            sg.Button("Clear apertures", key="-PHOTO_CLEAR_STARS-"),
-            sg.Button("Save apertures", key="-PHOTO_SAVE_APERTURES-"),
-            sg.Button("Load apertures", key="-PHOTO_LOAD_APERTURES-"),
+            sg.Button("Delete selected", key="-PHOTO_DELETE_SELECTED-", tooltip='Select an aperture in the list and delete here'),
+            sg.Button("Clear apertures", key="-PHOTO_CLEAR_STARS-", tooltip='Delete all the apertures'),
+            sg.Button("Save apertures", key="-PHOTO_SAVE_APERTURES-", tooltip='Save the apertures. Very useful for reproducible results'),
+            sg.Button("Load apertures", key="-PHOTO_LOAD_APERTURES-", tooltip='Load saved apertures. Of course, you should use the same sequence!'),
         ],
         # [sg.Text("Stars", size=(7, 1)), sg.Text("T=0, C=0", key="-PHOTO_STAR_COUNT-", size=(12, 1))],
         [sg.Listbox([], key="-PHOTO_STAR_LIST-", size=(59, 6), enable_events=False)],
     ]
 
     header_frame = [
-        [sg.Text("Time keys", size=(12, 1)), sg.Input("JD_UTC,JD,JD-OBS,MJD-OBS,MJD,DATE-OBS", key="-PHOTO_TIME_KEYS-", size=(44, 1))],
-        [sg.Text("Exp key"), sg.Input("EXPTIME", key="-PHOTO_EXPTIME_KEYS-", size=(9, 1)), sg.Text("Airmass"), sg.Input("AIRMASS", key="-PHOTO_AIRMASS_KEYS-", size=(10, 1)), sg.Text("Filter keys"), sg.Input("FILTER,FILT,INSFLNAM", key="-PHOTO_FILTER_KEYS-", size=(12, 1))],
+        [sg.Text("Time keys", size=(12, 1), tooltip='Plausible fits file keywords to allow the program to recognise the time\n in your images. Pproblably you''ll never have to worry about them'), sg.Input("JD_UTC,JD,JD-OBS,MJD-OBS,MJD,DATE-OBS", key="-PHOTO_TIME_KEYS-", size=(44, 1))],
+        [sg.Text("Exp key", tooltip='Plausible exposure time fits keywords to allow the program to recognise the exposure'), sg.Input("EXPTIME", key="-PHOTO_EXPTIME_KEYS-", size=(9, 1)), sg.Text("Airmass", tooltip='Plausible fits file keywords to allow the program to recognise the airmass values in your sequence'), sg.Input("AIRMASS", key="-PHOTO_AIRMASS_KEYS-", size=(10, 1)), sg.Text("Filter keys", tooltip='Plausible fits file keywords to allow the program to recognise the filters used. It''s just a plus, not very relevant'), sg.Input("FILTER,FILT,INSFLNAM", key="-PHOTO_FILTER_KEYS-", size=(12, 1))],
         [
-            sg.Text("FITS time ref"),
+            sg.Text("FITS time ref", tooltip='Time reference of fits files. Leave default'),
             sg.Combo(["Exposure start", "Mid-exposure", "Exposure end"], default_value="Exposure start", key="-PHOTO_TIME_REF-", size=(13, 1), readonly=True),
-            sg.Text("Main JD_UTC"),
+            sg.Text("Main JD_UTC", tooltip='Where take the Julian date info. If FITS time ref is set to Exposure start\nhere you should leave Mid-exposure corrected'),
             sg.Combo(["Header time", "Mid-exposure corrected"], default_value="Mid-exposure corrected", key="-PHOTO_MAIN_JDUTC-", size=(18, 1), readonly=True),
         ],
     ]
@@ -1316,11 +1582,11 @@ def _build_layout() -> List[List[sg.Element]]:
         [
             sg.Text("Output", size=(8, 1)),
             sg.Input("", key="-PHOTO_OUTPUT-", size=(42, 1)),
-            sg.FileSaveAs("Save as", file_types=(("Text table", "*.txt"), ("CSV", "*.csv"), ("All files", "*.*"))),
+            sg.FileSaveAs("Set path", file_types=(("Text table", "*.txt"), ("CSV", "*.csv"), ("All files", "*.*")), tooltip='Set the location and the name of the photometry file.\nIt will be saved automatically once you press Run photometry or Run + load in main'),
         ],
         [
-            sg.Button("Run photometry", button_color=("white", "#2d6cdf")),
-            sg.Button("Run + load in main", key="-PHOTO_RUN_AND_LOAD-"),
+            sg.Button("Run photometry", button_color=("white", "#2d6cdf"), tooltip='Run photometry and save the file, maintaining open this window'),
+            sg.Button("Run + load in main", key="-PHOTO_RUN_AND_LOAD-", tooltip='Run photometry, save the file, close the window, and load the file to the main program'),
             sg.Button("Close"),
         ],
         [sg.ProgressBar(100, orientation="h", size=(44, 12), key="-PHOTO_PROGRESS-")],
@@ -1408,12 +1674,14 @@ def _save_apertures(path: str, session: PhotometrySession, values: Dict[str, obj
         "sky_inner_radius": str(values.get("-PHOTO_SKY_IN-", "")),
         "sky_outer_radius": str(values.get("-PHOTO_SKY_OUT-", "")),
         "snap_click": bool(values.get("-PHOTO_SNAP_CLICK-", True)),
-        "recentre_frames": bool(values.get("-PHOTO_RECENTER-", True)),
+        "recenter_frames": bool(values.get("-PHOTO_RECENTER-", True)),
         "search_radius": str(values.get("-PHOTO_SEARCH_R-", "")),
         "saturation_level": str(values.get("-PHOTO_SAT_LEVEL-", "")),
         "peak_low_fraction": str(values.get("-PHOTO_PEAK_LOW_FRAC-", "")),
         "peak_high_fraction": str(values.get("-PHOTO_PEAK_HIGH_FRAC-", "")),
         "peak_max_frames": str(values.get("-PHOTO_PEAK_MAX_FRAMES-", "")),
+        "auto_max_comps": str(values.get("-PHOTO_AUTO_MAX_COMPS-", "")),
+        "auto_min_distance": str(values.get("-PHOTO_AUTO_MIN_DIST-", "")),
         "current_reference_file": session.files[session.current_index] if session.files else "",
         "stars": [star.__dict__ for star in session.stars],
     }
@@ -1455,6 +1723,8 @@ def _load_apertures(path: str, session: PhotometrySession, window: sg.Window, va
         ("-PHOTO_PEAK_LOW_FRAC-", "peak_low_fraction"),
         ("-PHOTO_PEAK_HIGH_FRAC-", "peak_high_fraction"),
         ("-PHOTO_PEAK_MAX_FRAMES-", "peak_max_frames"),
+        ("-PHOTO_AUTO_MAX_COMPS-", "auto_max_comps"),
+        ("-PHOTO_AUTO_MIN_DIST-", "auto_min_distance"),
     ]
     updated_values = dict(values)
     for key, data_key in field_map:
@@ -1468,7 +1738,7 @@ def _load_apertures(path: str, session: PhotometrySession, window: sg.Window, va
 
     checkbox_map = [
         ("-PHOTO_SNAP_CLICK-", "snap_click"),
-        ("-PHOTO_RECENTER-", "recentre_frames"),
+        ("-PHOTO_RECENTER-", "recenter_frames"),
     ]
     for key, data_key in checkbox_map:
         if data_key in data:
@@ -1498,7 +1768,7 @@ def _load_apertures(path: str, session: PhotometrySession, window: sg.Window, va
         _refresh_star_overlays(window, session, updated_values)
 
     n_loaded = len(session.stars)
-    recentre_text = "yes" if bool(updated_values.get("-PHOTO_RECENTER-", True)) else "no"
+    recenter_text = "yes" if bool(updated_values.get("-PHOTO_RECENTER-", True)) else "no"
     search_radius = str(updated_values.get("-PHOTO_SEARCH_R-", ""))
     try:
         window["-PHOTO_REPORT-"].update(
@@ -1506,7 +1776,7 @@ def _load_apertures(path: str, session: PhotometrySession, window: sg.Window, va
                 f"Apertures loaded: {path}\n"
                 f"Loaded apertures: {n_loaded}\n"
                 "Loaded coordinates are reference-frame FITS pixel coordinates.\n"
-                f"Recentre frames during photometry: {recentre_text}; search radius: {search_radius} px\n"
+                f"Recenter frames during photometry: {recenter_text}; search radius: {search_radius} px\n"
             ),
             append=True,
         )
@@ -1677,7 +1947,7 @@ def _run_photometry(window: sg.Window, session: PhotometrySession, values: Dict[
                     "aperture_radius": aper,
                     "sky_inner_radius": sky_in,
                     "sky_outer_radius": sky_out,
-                    "recentre": recenter,
+                    "recenter": recenter,
                     "search_radius": search_radius,
                     "peak_low_fraction": _peak_feedback_thresholds(values)[1],
                     "peak_high_fraction": _peak_feedback_thresholds(values)[2],
@@ -1737,7 +2007,7 @@ def run_aperture_photometry_tool(parent_window: Optional[sg.Window] = None) -> O
         modal=True,
         icon=icon_path,
     )
-
+    center_window(window)
     return_path: Optional[str] = None
 
     #Handling windows peculiarities: DPI awareness and mouse over buttons
@@ -1817,6 +2087,9 @@ def run_aperture_photometry_tool(parent_window: Optional[sg.Window] = None) -> O
                     except Exception:
                         pass
 
+                elif event == "-PHOTO_AUTO_FIND_COMPS-":
+                    _auto_find_comparison_stars(window, session, values)
+
                 elif event == "-PHOTO_REFRESH-" or event in ("-PHOTO_LOW_P-", "-PHOTO_HIGH_P-"):
                     if session.image is not None:
                         _draw_image(window, session, values)
@@ -1828,8 +2101,8 @@ def run_aperture_photometry_tool(parent_window: Optional[sg.Window] = None) -> O
                     aper = parse_float(values.get("-PHOTO_APER_R-", 6.0), 6.0)
                     pixel, peak, mean_ap = _aperture_stats_at(session.image, x, y, aper)
                     quality = _peak_quality_from_value(peak, values)
-                    quality_label, hover_colour, hover_bg = _peak_quality_style(quality)
-                    _update_hover_overlay(window, session, values, x, y, colour=hover_colour)
+                    quality_label, hover_color, hover_bg = _peak_quality_style(quality)
+                    _update_hover_overlay(window, session, values, x, y, color=hover_color)
                     info_text = (
                         f"x={x:.0f}, y={y:.0f}, pixel={pixel:.0f}, "
                         f"peak={peak:.1f}, mean(ap)={mean_ap:.1f}  [{quality_label}]"
@@ -1840,7 +2113,7 @@ def run_aperture_photometry_tool(parent_window: Optional[sg.Window] = None) -> O
                         window["-PHOTO_MOUSE_INFO-"].update(info_text)
 
                 elif event in ("-PHOTO_ZOOM_IN-", "-PHOTO_ZOOM_OUT-"):
-                    _zoom_image_centre(session, 1.0 if event == "-PHOTO_ZOOM_IN-" else -1.0)
+                    _zoom_image_center(session, 1.0 if event == "-PHOTO_ZOOM_IN-" else -1.0)
 
                 elif event == "-PHOTO_FIT_VIEW-":
                     _reset_image_view(session)
@@ -1924,3 +2197,54 @@ def run_aperture_photometry_tool(parent_window: Optional[sg.Window] = None) -> O
         window.close()
 
     return return_path
+
+
+
+
+def center_window(window, margin=20):
+    """
+    Center a PySimpleGUI window on the current screen and make sure
+    it does not open outside the visible area.
+
+    Cross-platform: Windows, Linux, macOS.
+    Does not change DPI awareness or scaling behavior.
+    """
+    try:
+        root = window.TKroot
+
+        # Force Tk to calculate the real window size
+        root.update_idletasks()
+        window.refresh()
+
+        screen_w = root.winfo_screenwidth()
+        screen_h = root.winfo_screenheight()
+
+        win_w = root.winfo_width()
+        win_h = root.winfo_height()
+
+        # Fallback in case Tk has not updated the size yet
+        if win_w <= 1:
+            win_w = root.winfo_reqwidth()
+        if win_h <= 1:
+            win_h = root.winfo_reqheight()
+
+        x = int((screen_w - win_w) / 2)
+        y = int((screen_h - win_h) / 2)
+
+        # Keep the window inside the screen
+        x = max(margin, min(x, screen_w - win_w - margin))
+        y = max(margin, min(y, screen_h - win_h - margin))
+
+        # If the window is taller than the screen, at least keep the title bar visible
+        if win_h > screen_h - 2 * margin:
+            y = margin
+
+        # If the window is wider than the screen, keep the left edge visible
+        if win_w > screen_w - 2 * margin:
+            x = margin
+
+        root.geometry(f"+{x}+{y}")
+        root.update_idletasks()
+
+    except Exception as e:
+        print(f"Warning: could not center window: {e}")

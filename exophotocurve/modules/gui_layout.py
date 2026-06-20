@@ -38,27 +38,6 @@ def make_layout() -> List[List[sg.Element]]:
     # ------------------------------------------------------------------
     # File loader. Kept outside the tabs because it is always needed.
     # ------------------------------------------------------------------
-    
-    
-    # sg.Menu([
-    #     ['&File', ['&Build light curve...', '&Save figure...', 'Save stats...', 'Save model results...', 'Save settings...', 'Load settings...', 'Reset view/data', 'Save curve...', 'Save recipe...',  'E&xit']],
-    #     # ['&Edit', ['Clear all tas&ks', 'Clean output', 'Show result folder', 'Change result folder...', 'Save current spectra list...']],
-    #     # ['&Window', ['Long-slit extraction', 'DataCube extraction', 'Text editor', 'FITS header editor', 'Spectra manipulation', 'Utilities']],
-    #     # ['P&rocess',['Pl&ot', 'Pre&view spec.']],
-    #     # ['&Analysis', ['Preview res&ult', 'Proc&ess selected', 'Process a&ll']],
-    #     # ['&Plotting', ['Plot data', 'Plot maps']],
-    #     # ['&View', ['Zoom In', 'Zoom Out', 'Reset Zoom']],
-    #     # ['&Help', ['&Quick start', '&Read me', 'Tips and tricks', 'SPAN Manual']],
-    #     # ['&About', ['About SPAN', 'Version', 'Read me']]
-    #     ])
-    
-    
-    
-    
-    
-    
-    
-    
     file_frame = [
         [
             sg.Button("Build light curve", button_color= ('black','light blue'),tooltip='Construct your lightcurve here starting from a calibrated and aligned image sequence in fit format'),
@@ -69,10 +48,8 @@ def make_layout() -> List[List[sg.Element]]:
                 file_types=(
                     ("Text files", "*.txt *.dat *.csv *.tsv"),
                     ("All files", "*.*"),
-                ), tooltip='If you already have a lightcurve file, browse it here and proceed to visualization and analysis'
-            ),
+                ), tooltip='If you already have a lightcurve file, browse it here, click Load table\nand proceed to visualization and analysis\n You can directly upload an AstroImageJ table or any table containing the data and names of the columns, WITHOUT the # character'),
             sg.Button("Load table", tooltip='Load your lightcurve text file that you have just browsed'),
-            # sg.Button("Build light curve"),
         ],
         [
             sg.Text("Delimiter", size=(13, 1)),
@@ -222,7 +199,7 @@ def make_layout() -> List[List[sg.Element]]:
 
     binning_tab = [
         [
-            sg.Checkbox("Enable binning", default=False, key="-BIN_ACTIVE-"),
+            sg.Checkbox("Enable binning", default=False, key="-BIN_ACTIVE-", tooltip='Enable and set binning points. Only for visualisation purposess'),
             sg.Text("Points/bin"),
             sg.Input("4", key="-BIN_N-", size=(5, 1)),
         ],
@@ -248,7 +225,7 @@ def make_layout() -> List[List[sg.Element]]:
 
     cleaning_tab = [
         [
-            sg.Checkbox("Enable sigma clipping", default=False, key="-CLEAN_ACTIVE-"),
+            sg.Checkbox("Enable sigma clipping", default=False, key="-CLEAN_ACTIVE-", tooltip='Enable and set the clipping of outliers. Once activated, press the Plot / update button to see the results'),
             sg.Text("Target"),
             sg.Combo(CLEANING_TARGETS, default_value="Residuals", key="-CLEAN_TARGET-", size=(17, 1), readonly=True),
         ],
@@ -257,15 +234,15 @@ def make_layout() -> List[List[sg.Element]]:
             sg.Input("4.0", key="-CLEAN_SIGMA-", size=(6, 1)),
             sg.Text("Iter"),
             sg.Input("3", key="-CLEAN_MAXITER-", size=(4, 1)),
-            sg.Text("Centre"),
+            sg.Text("Center"),
             sg.Combo(CLEANING_CENTRES, default_value="Median", key="-CLEAN_CENTRE-", size=(8, 1), readonly=True),
             sg.Text("Scale"),
             sg.Combo(CLEANING_SCALES, default_value="MAD", key="-CLEAN_SCALE-", size=(8, 1), readonly=True),
         ],
         [
-            sg.Checkbox("Show rejected", default=True, key="-CLEAN_SHOW_REJECTED-"),
-            sg.Checkbox("Rejected legend", default=True, key="-CLEAN_REJ_LEGEND-"),
-            sg.Checkbox("Apply to stats", default=True, key="-CLEAN_APPLY_STATS-"),
+            sg.Checkbox("Show rejected", default=True, key="-CLEAN_SHOW_REJECTED-", tooltip='Showing the rejected points in the plot. Just for visualisation purposes'),
+            sg.Checkbox("Rejected legend", default=True, key="-CLEAN_REJ_LEGEND-", tooltip='Showing the rejected point legend in the plot'),
+            sg.Checkbox("Apply to stats", default=True, key="-CLEAN_APPLY_STATS-", tooltip='Update the stats tab and analysis with the nes subset of points without the rejected outliers'),
         ],
         [
             sg.Text("Rejected", size=(8, 1)),
@@ -279,8 +256,8 @@ def make_layout() -> List[List[sg.Element]]:
         ],
         [sg.HorizontalSeparator()],
         [
-            sg.Checkbox("Apply manual rejects", default=True, key="-MANUAL_CLEAN_ACTIVE-", enable_events=True),
-            sg.Checkbox("Click-edit plot", default=False, key="-MANUAL_POINT_EDIT-"),
+            sg.Checkbox("Apply manual rejects", default=True, key="-MANUAL_CLEAN_ACTIVE-", enable_events=True, tooltip='Enable (also) the manual rejection of the points'),
+            sg.Checkbox("Click-edit plot", default=False, key="-MANUAL_POINT_EDIT-", tooltip='Activate the mouse click rejection, then you can click on a point in the plot to reject or re-activate a point.\nPlot updates in real time'),
             sg.Text("mode"),
             sg.Combo(
                 ["Toggle nearest", "Reject nearest", "Restore nearest"],
@@ -336,8 +313,8 @@ def make_layout() -> List[List[sg.Element]]:
             ),
         ],
         [
-            sg.Checkbox("Mask transit", default=True, key="-DET_MASK_TRANSIT-", disabled=True),
-            sg.Checkbox("Use clean mask", default=True, key="-DET_USE_CLEANING_MASK-", disabled=True),
+            sg.Checkbox("Mask transit", default=True, key="-DET_MASK_TRANSIT-", disabled=True, tooltip='Masking the transit and considering only Out Of Transit points for calculating the detrend.\nI strongly suggest to keep activated, but you can try to deactivate and see the results!'),
+            sg.Checkbox("Use clean mask", default=True, key="-DET_USE_CLEANING_MASK-", disabled=True, tooltip='Using the actual data points and neglecting automatically of manually rejected data points in the Cleaning tab\nDeactivate to use all the original data points of your dataset. If you did not reject any point, the result will not change'),
         # ],
         # [
             sg.Text("Poly", size=(5, 1)),
@@ -349,29 +326,29 @@ def make_layout() -> List[List[sg.Element]]:
         ],
 
         [
-            sg.Checkbox("Meridian flip", default=False, key="-DET_FLIP_ACTIVE-", disabled=True, enable_events=True),
+            sg.Checkbox("Meridian flip", default=False, key="-DET_FLIP_ACTIVE-", disabled=True, enable_events=True, tooltip='Activate the meridian flip correction, only if during your photometric session your telescope performed a meridian flip and you notice the\n characteristic jump in your light curve. You should insert also the JD_UTC time decimals, that is, something like that: .771\nMeridian flip correction activates with the Run detrending button, like the other detrending methods'),
             sg.Text("time frac"),
             sg.Input("", key="-DET_FLIP_FRAC-", size=(6, 1), disabled=True, enable_events=True),
             # sg.Button("Update line", key="-DET_UPDATE_FLIP_MARKER-", disabled=True),
-            sg.Checkbox("Show line", default=True, key="-DET_SHOW_FLIP_MARKER-", disabled=True, enable_events=True),
+            sg.Checkbox("Show line", default=True, key="-DET_SHOW_FLIP_MARKER-", disabled=True, enable_events=True, tooltip='After you set the fraction JD_UTC time of the meridian flip, activate this to see a vertical line in the plot corrsponding to the time of the meridian flip.\n If you change the time, you can update the line by deselecting and selecting again this checkboz or by pressing the Plot / update button'),
             sg.Text("Flip mode", size=(9, 1)),
             sg.Combo(
-                ["Step only", "Step + after-flip slope"],
-                default_value="Step only",
+                ["Robust level matching", "Step only", "Step + after-flip slope"],
+                default_value="Robust level matching",
                 key="-DET_FLIP_MODE-",
                 size=(15, 1),
                 readonly=True,
                 disabled=True,
+                tooltip="Robust level matching is recommended. It measures the pre/post-flip level using good out-of-transit points\nand corrects the post-flip part multiplicatively. Step modes are advanced regression-based options.",
             ),
         ],
 
-
-
         [
-            sg.Checkbox("Send detrended curve to Data/Transit", default=True, key="-DET_SEND_TO_DATA-", disabled=True),
-            sg.Checkbox("Show popup", default=True, key="-DET_SHOW_POPUP-", disabled=True),
+            sg.Checkbox("Consider fit model", default=False, key="-DET_USE_TRANSIT_MODEL-", disabled=True, tooltip="Use the latest transit fit model when estimating the detrending baseline."),
+            sg.Checkbox("Send detrended curve to Data/Transit", default=True, key="-DET_SEND_TO_DATA-", disabled=True, tooltip='Using the result of detrend as the new light curve'),
+            sg.Checkbox("Show popup", default=True, key="-DET_SHOW_POPUP-", disabled=True, tooltip='Showing a pop-up info containing the results of detrending once you press the Run detrend button'),
         ],
-        [sg.Button("Run detrending", disabled=True), sg.Button("Clear detrending", disabled=True)],
+        [sg.Button("Run detrending", disabled=True, tooltip='Well, this is self-explicative: run the detrend(s) activated, including the meridian flip correction'), sg.Button("Clear detrending", disabled=True, tooltip='Clear all the detrending performed. Also the meridian flip correction will be cleared but the relative checkbox will stay activated!')],
         [
             sg.Multiline(
                 "",
@@ -406,7 +383,7 @@ def make_layout() -> List[List[sg.Element]]:
     comp_tab = [
         [
             sg.Text(
-                "Inactive until an AstroImageJ table with Source-Sky_T*/C* flux columns is loaded.",
+                "Inactive until a table with Source-Sky_T*/C* flux columns is loaded.",
                 key="-COMP_STATUS-",
                 size=(54, 2),
                 text_color="firebrick",
@@ -430,7 +407,7 @@ def make_layout() -> List[List[sg.Element]]:
             ),
         ],
         [
-            sg.Checkbox("Mask expected transit", default=True, key="-COMP_MASK_TRANSIT-", disabled=True),
+            sg.Checkbox("Mask expected transit", default=True, key="-COMP_MASK_TRANSIT-", disabled=True, tooltip='Maintain activated if you are running the automatic selection of comparison stars directly on the transiti curve'),
             sg.Text("Poly"),
             sg.Combo(["0", "1", "2"], default_value="1", key="-COMP_POLY_ORDER-", size=(4, 1), readonly=True, disabled=True),
         ],
@@ -444,17 +421,21 @@ def make_layout() -> List[List[sg.Element]]:
             sg.Input("0.5", key="-COMP_IMPROVE_THRESHOLD-", size=(5, 1), disabled=True),
         ],
         [
-            sg.Checkbox("Send optimised curve to Data/Transit", default=True, key="-COMP_SEND_TO_DATA-", disabled=True),
-            sg.Checkbox("Show popup", default=True, key="-COMP_SHOW_POPUP-", disabled=True), sg.Button("Run comp optimiser", disabled=True, tooltip='Run the automatic optimization of the comparison stars'),
+            sg.Checkbox("Send optimised curve to Data/Transit", default=True, key="-COMP_SEND_TO_DATA-", disabled=True, tooltip='This will be the new light curve to analyze'),
+            sg.Checkbox("Show popup", default=True, key="-COMP_SHOW_POPUP-", disabled=True, tooltip='Showing a pop-up window with the results once you press Run comp optimizer'), sg.Button("Run comp optimizer", disabled=True, tooltip='Run the automatic optimisation for choosing the best set of comparison stars'),
         ],
         [sg.HorizontalSeparator(pad=(0, 8))],
-        [sg.Text("Manually adjust the compariso stars")],
+        [sg.Text("Manually adjust the comparison stars")],
         [
-            
             sg.Text("Comparison stars", size=(14, 1)),
-            sg.Button("All", key="-COMP_SELECT_ALL-", disabled=True),
-            sg.Button("None", key="-COMP_SELECT_NONE-", disabled=True),
+            sg.Button("All", key="-COMP_SELECT_ALL-", disabled=True, tooltip='Select all the comparison stars available'),
+            sg.Button("None", key="-COMP_SELECT_NONE-", disabled=True, tooltip='Deselect all the comparison stars. Remember then to activate at least one to see a light curve!'),
             sg.Text("click a star to toggle", size=(22, 1)),
+        ],
+        [
+            sg.Text("Diag star", size=(14, 1)),
+            sg.Combo([], key="-COMP_DIAG_STAR-", size=(10, 1), readonly=True, disabled=True, enable_events=True, tooltip='Choose a comparison star to inspect. Its light curve is built against the ensemble of the other active comparison stars.'),
+            sg.Checkbox("Plot selected comp", default=False, key="-COMP_PLOT_DIAG-", disabled=True, enable_events=True, tooltip='Plot the selected comparison-star diagnostic curve instead of the science target curve.'),
         ],
         [
             sg.Listbox(
@@ -476,22 +457,6 @@ def make_layout() -> List[List[sg.Element]]:
             ),
 
         ],
-        # [    sg.Text(
-        #         "Active stars are used for manual curves and as the candidate pool for the automatic optimiser.",
-        #         size=(27, 8),
-        #     ),
-        # ],
-
-        # [
-            # sg.Multiline(
-            #     "",
-            #     key="-COMP_REPORT-",
-            #     size=(54, 8),
-            #     disabled=True,
-            #     autoscroll=False,
-            #     no_scrollbar=False,
-            # )
-        # ],
     ]
 
     transit_tab = [
@@ -557,18 +522,18 @@ def make_layout() -> List[List[sg.Element]]:
         ],
         [
             sg.Text("Fit", size=(9, 1)),
-            sg.Checkbox("Tmid", default=True, key="-TR_FIT_TMID-"),
-            sg.Checkbox("Depth", default=True, key="-TR_FIT_DEPTH-"),
-            sg.Checkbox("Duration", default=True, key="-TR_FIT_DURATION-"),
+            sg.Checkbox("Tmid", default=True, key="-TR_FIT_TMID-", tooltip='Fitting the mid-transit time'),
+            sg.Checkbox("Depth", default=True, key="-TR_FIT_DEPTH-", tooltip='Fitting the depth of the transit'),
+            sg.Checkbox("Duration", default=True, key="-TR_FIT_DURATION-", tooltip='Fitting the duration of the transit. If you want to be coherent with HOPS or ExoClock results, this parameter should not be fitted'),
         ],
         [
-            sg.Checkbox("Show transit fit on plot", default=True, key="-TR_SET_MODEL_COLUMNS-", enable_events=True),
-            sg.Checkbox("Show report popup", default=True, key="-TR_SHOW_POPUP-"),
+            sg.Checkbox("Show transit fit on plot", default=True, key="-TR_SET_MODEL_COLUMNS-", enable_events=True, tooltip='Showing the transit fit, the expected model and the residuals in the plot'),
+            sg.Checkbox("Show report popup", default=True, key="-TR_SHOW_POPUP-", tooltip='Showing a detailed report of the fit in a pop-up window once you perform the fit by pressing the Run transit model button'),
         ],
         [
             sg.Text("Labels", size=(9, 1)),
-            sg.Checkbox("Predicted times", default=False, key="-TR_SHOW_PREDICTED_TIMES-", enable_events=True),
-            sg.Checkbox("Calculated times", default=False, key="-TR_SHOW_CALCULATED_TIMES-", enable_events=True),
+            sg.Checkbox("Predicted times", default=False, key="-TR_SHOW_PREDICTED_TIMES-", enable_events=True, tooltip='Showing the predicted times of the transit in the plot'),
+            sg.Checkbox("Calculated times", default=False, key="-TR_SHOW_CALCULATED_TIMES-", enable_events=True, tooltip='Showing the calculated times of the transit in the plot.\nIf Predicted times is activated, the O-C value of the transit timing will also be shown in the plot'),
         ],
         [
             sg.Text(
@@ -626,7 +591,7 @@ def make_layout() -> List[List[sg.Element]]:
 
 
     control_column = [
-        [sg.Frame("Load and set the photometry file", file_frame, font=("Helvetica", 13, 'bold'))],
+        [sg.Frame("Start here: build a ligh curve or load a light curve file", file_frame, font=("Helvetica", 13, 'bold'))],
         [control_tabs],
         [sg.HorizontalSeparator()],
         buttons_row_1,
@@ -649,11 +614,12 @@ def make_layout() -> List[List[sg.Element]]:
         [sg.Menu([
         ['&File', ['&Build light curve', '&Save figure', 'Save stats', 'Save model results', 'Save settings', 'Load settings', 'Reset view/data', 'Save curve', 'Save recipe',  'E&xit']],
         ['&Data', ['Load table', 'Plot / update']],
-        ['&Comp stars', ['Run comp optimiser']],
+        ['&Comp stars', ['Run comp optimizer']],
         ['Detrend', ['Run detrending', 'Clear detrending']],
         ['Transit modeling', ['Use NASA', 'Use ExoClock', 'Load catalogue', 'Run transit model']],
         ['Help', ['User manual']],
         ])],
+        
         [
             sg.Column(control_column, vertical_alignment="top", expand_y=False, expand_x=False),
             sg.VSeparator(),

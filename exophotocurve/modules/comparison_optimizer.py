@@ -46,6 +46,26 @@ class CandidateMetric:
     n_points: int
 
 
+
+
+@dataclass
+class ComparisonDiagnosticCurve:
+    """Leave-one-out diagnostic curve for one comparison star.
+
+    The tested comparison star is treated as a temporary target and is divided
+    by the ensemble of the other active comparison stars.  This helps users
+    detect comparison stars that are variable, noisy or affected by local
+    systematics before they are used in the science-target light curve.
+    """
+
+    star_id: str
+    reference_stars: List[str]
+    flux: np.ndarray
+    flux_err: np.ndarray
+    ensemble: np.ndarray
+    metric: CandidateMetric
+    warning: str = ""
+
 @dataclass
 class ComparisonOptimisationResult:
     """Result returned by the comparison-star optimiser."""
@@ -281,10 +301,11 @@ def make_differential_light_curve(
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Build a differential light curve from raw AIJ source counts.
 
-    Each star is normalised by its median.  The comparison ensemble is a
-    weighted mean of the normalised comparison stars, with weights based on the
-    robust scatter of each normalised star.  This avoids letting the brightest
-    comparison star dominate purely because it has more counts.
+    Each star is normalised by its median.  The comparison ensemble is the
+    unweighted mean of the normalised comparison stars.  This deliberately
+    matches the curve written by the integrated aperture-photometry builder, so
+    selecting all comparison stars in the main program reproduces the original
+    ``rel_flux_T1`` curve.
     """
     target_id = _normalise_star_id(target_id)
     comparison_ids = [_normalise_star_id(sid) for sid in comparison_ids]
@@ -298,7 +319,6 @@ def make_differential_light_curve(
     target_norm = _normalised_flux(target_raw)
 
     comp_norms: List[np.ndarray] = []
-    comp_weights: List[float] = []
     comp_rel_errs: List[np.ndarray] = []
 
     for comp_id in comparison_ids:
@@ -311,7 +331,6 @@ def make_differential_light_curve(
         if not np.isfinite(scatter) or scatter <= 0:
             continue
         comp_norms.append(norm)
-        comp_weights.append(1.0 / max(scatter, 1.0e-8) ** 2)
 
         err_column = detection.error_columns.get(comp_id)
         if err_column and err_column in df.columns:
@@ -325,15 +344,14 @@ def make_differential_light_curve(
         raise ValueError("No valid comparison-star fluxes were available for this subset.")
 
     comp_matrix = np.vstack(comp_norms)
-    weights = np.asarray(comp_weights, dtype=float)
-    if not np.isfinite(weights).any() or np.nansum(weights) <= 0:
-        weights = np.ones(len(comp_norms), dtype=float)
-    weights = weights / np.nansum(weights)
 
-    valid_comp = np.isfinite(comp_matrix)
-    weighted = np.where(valid_comp, comp_matrix * weights[:, None], 0.0)
-    weight_sum = np.sum(np.where(valid_comp, weights[:, None], 0.0), axis=0)
-    ensemble = np.divide(weighted.sum(axis=0), weight_sum, out=np.full(comp_matrix.shape[1], np.nan), where=weight_sum > 0)
+    # Keep the manual comparison-star curves strictly reproducible.  The
+    # aperture-photometry builder writes rel_flux_T1 using an AIJ-like ensemble:
+    # every comparison star is normalised by its own median and the ensemble is
+    # the unweighted mean of those normalised comparison curves.  The main
+    # program must use the same rule when the user toggles comparison stars;
+    # otherwise selecting all stars again would not recover the original curve.
+    ensemble = np.nanmean(comp_matrix, axis=0)
 
     rel_flux = np.divide(target_norm, ensemble, out=np.full_like(target_norm, np.nan), where=np.isfinite(ensemble) & (ensemble != 0))
     rel_flux = rel_flux / _safe_median(rel_flux)
@@ -349,8 +367,7 @@ def make_differential_light_curve(
 
     if comp_rel_errs:
         comp_rel_err_matrix = np.vstack(comp_rel_errs)
-        comp_var = np.nansum((weights[:, None] * comp_rel_err_matrix) ** 2, axis=0)
-        comp_rel_err = np.sqrt(comp_var)
+        comp_rel_err = np.nanmean(comp_rel_err_matrix, axis=0) / np.sqrt(max(1, len(comp_rel_errs)))
     else:
         comp_rel_err = np.full_like(target_raw, np.nan, dtype=float)
 
@@ -815,6 +832,155 @@ def build_manual_comparison_result(
         report=report,
     )
 
+
+
+def build_comparison_diagnostics(
+    df: pd.DataFrame,
+    detection: AijFluxDetection,
+    x: np.ndarray,
+    selected_comparisons: Sequence[str],
+    polynomial_order: int = 1,
+) -> Dict[str, ComparisonDiagnosticCurve]:
+    """Build leave-one-out relative light curves for active comparison stars.
+
+    For each active comparison star ``Ci`` the diagnostic curve is computed as
+    ``Ci / ensemble(other active comparisons)``.  The tested star is never used
+    in its own denominator.  With fewer than two active comparison stars the
+    diagnostic cannot identify which star is responsible for a mismatch, so no
+    curve is generated.
+    """
+    if not detection.compatible:
+        return {}
+
+    selected: List[str] = []
+    seen = set()
+    for sid in selected_comparisons:
+        sid = _normalise_star_id(sid)
+        if sid in detection.comparison_ids and sid not in seen:
+            selected.append(sid)
+            seen.add(sid)
+    selected = sorted(selected, key=_star_sort_key)
+
+    diagnostics: Dict[str, ComparisonDiagnosticCurve] = {}
+    if len(selected) < 2:
+        return diagnostics
+
+    for star_id in selected:
+        reference_stars = [sid for sid in selected if sid != star_id]
+        if not reference_stars:
+            continue
+        try:
+            flux, flux_err, ensemble = make_differential_light_curve(
+                df,
+                detection,
+                target_id=star_id,
+                comparison_ids=reference_stars,
+            )
+            metric = evaluate_light_curve_metric(
+                x,
+                flux,
+                mask=None,
+                polynomial_order=polynomial_order,
+            )
+            warning = ""
+            if not np.isfinite(metric.objective):
+                warning = "metric unavailable"
+            elif len(reference_stars) < 2:
+                warning = "only one reference star; diagnostic is ambiguous"
+            diagnostics[star_id] = ComparisonDiagnosticCurve(
+                star_id=star_id,
+                reference_stars=reference_stars,
+                flux=flux,
+                flux_err=flux_err,
+                ensemble=ensemble,
+                metric=metric,
+                warning=warning,
+            )
+        except Exception as exc:
+            diagnostics[star_id] = ComparisonDiagnosticCurve(
+                star_id=star_id,
+                reference_stars=reference_stars,
+                flux=np.full_like(np.asarray(x, dtype=float), np.nan, dtype=float),
+                flux_err=np.full_like(np.asarray(x, dtype=float), np.nan, dtype=float),
+                ensemble=np.full_like(np.asarray(x, dtype=float), np.nan, dtype=float),
+                metric=CandidateMetric(np.inf, np.inf, np.nan, np.nan, np.inf, 0),
+                warning=str(exc),
+            )
+
+    return diagnostics
+
+
+def _diagnostic_flag(metric: CandidateMetric, reference_count: int) -> str:
+    """Return a compact human-readable flag for one comparison diagnostic."""
+    if metric is None or not np.isfinite(metric.objective):
+        return "unusable"
+    if reference_count < 2:
+        return "ambiguous"
+    if metric.rms_ppt <= 4.0 and metric.mad_ppt <= 3.0:
+        return "OK"
+    if metric.rms_ppt <= 8.0 and metric.mad_ppt <= 6.0:
+        return "check"
+    return "suspect"
+
+
+def format_comparison_diagnostics_report(
+    diagnostics: Dict[str, ComparisonDiagnosticCurve],
+) -> str:
+    """Return a readable report for comparison-star leave-one-out curves."""
+    lines = [
+        "Comparison-star diagnostics",
+        "",
+        "Each comparison star is divided by the ensemble of the other active comparison stars.",
+        "This leave-one-out test helps identify noisy or possibly variable comparison stars.",
+    ]
+    if not diagnostics:
+        lines.extend(
+            [
+                "",
+                "Not enough active comparison stars for leave-one-out diagnostics.",
+                "Use at least two active comparison stars; three or more are recommended.",
+            ]
+        )
+        return "\n".join(lines)
+
+    if len(diagnostics) < 3:
+        lines.extend(
+            [
+                "",
+                "Note: diagnostics are most reliable with three or more comparison stars.",
+                "With only two active comparisons, a mismatch can be detected but the responsible star is ambiguous.",
+            ]
+        )
+
+    lines.extend(["", "Star   Ref. stars          RMS[ppt]  MAD[ppt]  beta   lag-1    flag"])
+    for star_id in sorted(diagnostics, key=_star_sort_key):
+        diag = diagnostics[star_id]
+        metric = diag.metric
+        flag = _diagnostic_flag(metric, len(diag.reference_stars))
+        beta = "nan" if not np.isfinite(metric.beta_factor) else f"{metric.beta_factor:5.2f}"
+        lag = "nan" if not np.isfinite(metric.autocorr_lag1) else f"{metric.autocorr_lag1:+6.3f}"
+        rms = "nan" if not np.isfinite(metric.rms_ppt) else f"{metric.rms_ppt:8.3f}"
+        mad = "nan" if not np.isfinite(metric.mad_ppt) else f"{metric.mad_ppt:8.3f}"
+        refs = ",".join(diag.reference_stars)
+        if len(refs) > 18:
+            refs = refs[:15] + "..."
+        line = f"{star_id:<5s}  {refs:<18s} {rms} {mad} {beta} {lag}  {flag}"
+        if diag.warning:
+            line += f"  ({diag.warning})"
+        lines.append(line)
+
+    lines.extend(
+        [
+            "",
+            "Generated diagnostic columns",
+            "PhotoCurve_compdiag_time",
+            "PhotoCurve_compdiag_<star>_flux",
+            "PhotoCurve_compdiag_<star>_err",
+            "",
+            "Tip: select a diagnostic star and enable 'Plot selected comp' to inspect its relative curve.",
+        ]
+    )
+    return "\n".join(lines)
 
 def _format_metric(metric: Optional[CandidateMetric]) -> str:
     """Format a metric block for the report."""

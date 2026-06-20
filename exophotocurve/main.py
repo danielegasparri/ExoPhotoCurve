@@ -49,9 +49,12 @@ try:
     from modules.config_utils import apply_config, load_config, save_config
     from modules.comparison_optimizer import (
         AijFluxDetection,
+        ComparisonDiagnosticCurve,
         ComparisonOptimisationResult,
+        build_comparison_diagnostics,
         build_manual_comparison_result,
         detect_aij_flux_columns,
+        format_comparison_diagnostics_report,
         optimise_comparison_stars,
     )
     from modules.detrending_utils import (
@@ -97,9 +100,12 @@ except ModuleNotFoundError: #local import if executed as package
     from .modules.config_utils import apply_config, load_config, save_config
     from .modules.comparison_optimizer import (
         AijFluxDetection,
+        ComparisonDiagnosticCurve,
         ComparisonOptimisationResult,
+        build_comparison_diagnostics,
         build_manual_comparison_result,
         detect_aij_flux_columns,
+        format_comparison_diagnostics_report,
         optimise_comparison_stars,
     )
     from .modules.detrending_utils import (
@@ -137,6 +143,57 @@ except ModuleNotFoundError: #local import if executed as package
 #Define the base dir of SPAN in your device
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 icon_path = os.path.join(BASE_DIR, "ExoPhotoCurve.ico")
+
+
+def center_window(window, margin=20):
+    """
+    Center a PySimpleGUI window on the current screen and make sure
+    it does not open outside the visible area.
+
+    Cross-platform: Windows, Linux, macOS.
+    Does not change DPI awareness or scaling behavior.
+    """
+    try:
+        root = window.TKroot
+
+        # Force Tk to calculate the real window size
+        root.update_idletasks()
+        window.refresh()
+
+        screen_w = root.winfo_screenwidth()
+        screen_h = root.winfo_screenheight()
+
+        win_w = root.winfo_width()
+        win_h = root.winfo_height()
+
+        # Fallback in case Tk has not updated the size yet
+        if win_w <= 1:
+            win_w = root.winfo_reqwidth()
+        if win_h <= 1:
+            win_h = root.winfo_reqheight()
+
+        x = int((screen_w - win_w) / 2)
+        y = int((screen_h - win_h) / 2)
+
+        # Keep the window inside the screen
+        x = max(margin, min(x, screen_w - win_w - margin))
+        y = max(margin, min(y, screen_h - win_h - margin))
+
+        # If the window is taller than the screen, at least keep the title bar visible
+        if win_h > screen_h - 2 * margin:
+            y = margin
+
+        # If the window is wider than the screen, keep the left edge visible
+        if win_w > screen_w - 2 * margin:
+            x = margin
+
+        root.geometry(f"+{x}+{y}")
+        root.update_idletasks()
+
+    except Exception as e:
+        print(f"Warning: could not center window: {e}")
+        
+        
 # Simple function to open the PDF manual
 def open_manual():
     try:
@@ -342,7 +399,7 @@ def resolve_detrending_input_selection(
 def contains_photocurve_columns(selection: Dict[str, str]) -> bool:
     """Return True if a selection points to transient diagnostic columns.
 
-    Comparison-star optimiser columns are intentionally treated as user-facing
+    Comparison-star optimizer columns are intentionally treated as user-facing
     input columns.  This lets the user fit a transit to
     ``PhotoCurve_compopt_flux`` and later hide the transit model while keeping
     the optimised light curve selected.
@@ -350,6 +407,7 @@ def contains_photocurve_columns(selection: Dict[str, str]) -> bool:
     return any(
         str(value).startswith("PhotoCurve_")
         and not str(value).startswith("PhotoCurve_compopt_")
+        and not str(value).startswith("PhotoCurve_compdiag_")
         and not str(value).startswith("PhotoCurve_det_")
         for value in selection.values()
     )
@@ -377,7 +435,7 @@ def update_values_with_selection(values: Dict[str, object], selection: Optional[
 def remove_photocurve_columns(df: pd.DataFrame) -> pd.DataFrame:
     """Return a copy of *df* without transient diagnostic PhotoCurve columns.
 
-    The comparison-star optimiser produces ``PhotoCurve_compopt_*`` columns
+    The comparison-star optimizer produces ``PhotoCurve_compopt_*`` columns
     that are valid light-curve inputs for the Transit tab.  They should survive
     a transit diagnostic run; Reset view/data is the action that removes them.
     """
@@ -386,6 +444,7 @@ def remove_photocurve_columns(df: pd.DataFrame) -> pd.DataFrame:
         for column in df.columns
         if not str(column).startswith("PhotoCurve_")
         or str(column).startswith("PhotoCurve_compopt_")
+        or str(column).startswith("PhotoCurve_compdiag_")
         or str(column).startswith("PhotoCurve_det_")
     ]
     return df.loc[:, keep_columns].copy()
@@ -423,6 +482,7 @@ def clear_transit_diagnostic_columns(df: pd.DataFrame) -> pd.DataFrame:
         for column in df.columns
         if not str(column).startswith("PhotoCurve_")
         or str(column).startswith("PhotoCurve_compopt_")
+        or str(column).startswith("PhotoCurve_compdiag_")
     ]
     return df.loc[:, keep_columns].copy()
 
@@ -704,7 +764,7 @@ def _describe_time_column(column_name: str, values: Dict[str, object]) -> str:
     if name == "PhotoCurve_time_input":
         return f"input time before BJD_TDB conversion ({time_system}, {timestamp_ref})"
     if name.startswith("PhotoCurve_compopt_time"):
-        return f"comparison-star optimiser time, inherited from the source column ({time_system})"
+        return f"comparison-star optimizer time, inherited from the source column ({time_system})"
     if name.startswith("PhotoCurve_det_time"):
         return f"photometric-detrending time, inherited from the source column ({time_system})"
     if "BJD" in name.upper() and "TDB" in name.upper():
@@ -1063,7 +1123,7 @@ def build_reproducibility_recipe(
     lines.append(f"Comp-star polynomial order: {values.get('-COMP_POLY_ORDER-', '')}")
     lines.append(f"Manual/current active comparison stars: {_compact_list(sorted(comp_active_stars))}")
     if last_comp_result is not None:
-        lines.append(f"Automatic optimiser was run: yes")
+        lines.append(f"Automatic optimizer was run: yes")
         lines.append(f"Optimiser initial comparison stars: {_compact_list(last_comp_result.initial_comparisons)}")
         lines.append(f"Optimiser rejected comparison stars: {_compact_list(last_comp_result.rejected_comparisons)}")
         lines.append(f"Optimiser removed sequence: {_compact_list(last_comp_result.removed_sequence)}")
@@ -1074,7 +1134,7 @@ def build_reproducibility_recipe(
             lines.append(f"Improvement vs current input: {last_comp_result.improvement_vs_current_percent:+.2f} %")
         lines.append(f"Improvement vs all accepted comparisons: {last_comp_result.improvement_vs_all_percent:+.2f} %")
     else:
-        lines.append("Automatic optimiser was run: no")
+        lines.append("Automatic optimizer was run: no")
     lines.append("")
 
     lines.append("Cleaning and manual point editing")
@@ -1082,7 +1142,7 @@ def build_reproducibility_recipe(
     lines.append(f"Sigma clipping target: {values.get('-CLEAN_TARGET-', '')}")
     lines.append(f"Sigma threshold: {values.get('-CLEAN_SIGMA-', '')}")
     lines.append(f"Sigma max iterations: {values.get('-CLEAN_MAXITER-', '')}")
-    lines.append(f"Sigma centre: {values.get('-CLEAN_CENTRE-', '')}")
+    lines.append(f"Sigma center: {values.get('-CLEAN_CENTRE-', '')}")
     lines.append(f"Sigma scale: {values.get('-CLEAN_SCALE-', '')}")
     lines.append(f"Manual rejects enabled: {_yes_no(values.get('-MANUAL_CLEAN_ACTIVE-', True))}")
     lines.append(f"Manual rejected point indices: {_compact_list(sorted(manual_reject_indices))}")
@@ -1108,6 +1168,7 @@ def build_reproducibility_recipe(
     lines.append(f"Active detrending regressors in GUI: {_compact_list(sorted(detrend_active_regressors))}")
     lines.append(f"Mask expected transit during detrending: {_yes_no(values.get('-DET_MASK_TRANSIT-', True))}")
     lines.append(f"Use cleaning mask during detrending: {_yes_no(values.get('-DET_USE_CLEANING_MASK-', True))}")
+    lines.append(f"Consider transit fit model during detrending: {_yes_no(values.get('-DET_USE_TRANSIT_MODEL-', False))}")
     lines.append(f"Detrending polynomial order: {values.get('-DET_POLY_ORDER-', '')}")
     lines.append(f"Detrending robust sigma: {values.get('-DET_ROBUST_SIGMA-', '')}")
     lines.append(f"Detrending robust iterations: {values.get('-DET_ROBUST_ITER-', '')}")
@@ -1123,6 +1184,7 @@ def build_reproducibility_recipe(
         lines.append(f"RMS before detrending: {last_detrend_result.rms_before_ppt:.3f} ppt")
         lines.append(f"RMS after detrending: {last_detrend_result.rms_after_ppt:.3f} ppt")
         lines.append(f"Detrending improvement: {last_detrend_result.improvement_percent:+.2f} %")
+        lines.append(f"Transit fit model used by detrending: {_yes_no(getattr(last_detrend_result, 'transit_model_used', False))}")
         if getattr(last_detrend_result, 'meridian_flip_enabled', False):
             lines.append(f"Meridian flip full time used: {last_detrend_result.meridian_flip_time:.8f}")
             lines.append(f"Meridian flip model used: {last_detrend_result.meridian_flip_mode}")
@@ -1521,7 +1583,7 @@ def nearest_point_index_for_click(
 
 
 def update_comparison_tab(window: sg.Window, detection: Optional[AijFluxDetection], active_stars: Optional[set[str]] = None) -> None:
-    """Enable or disable the comparison-star optimiser controls."""
+    """Enable or disable the comparison-star optimizer controls."""
     control_keys = [
         "-COMP_TARGET-",
         "-COMP_CHECK-",
@@ -1534,19 +1596,23 @@ def update_comparison_tab(window: sg.Window, detection: Optional[AijFluxDetectio
         "-COMP_SEND_TO_DATA-",
         "-COMP_SHOW_POPUP-",
         "-COMP_STAR_LIST-",
+        "-COMP_DIAG_STAR-",
+        "-COMP_PLOT_DIAG-",
         "-COMP_SELECT_ALL-",
         "-COMP_SELECT_NONE-",
-        "Run comp optimiser",
+        "Run comp optimizer",
     ]
 
     if detection is None or not detection.compatible:
         warning = detection.warning if detection is not None else (
-            "Comparison-star optimiser inactive: load an AstroImageJ table with Source-Sky_T*/C* flux columns."
+            "Comparison-star optimizer inactive: load an AstroImageJ table with Source-Sky_T*/C* flux columns."
         )
         try:
             window["-COMP_STATUS-"].update(warning, text_color="firebrick")
             window["-COMP_TARGET-"].update(values=[], value="")
             window["-COMP_CHECK-"].update(values=[""], value="")
+            window["-COMP_DIAG_STAR-"].update(values=[], value="")
+            window["-COMP_PLOT_DIAG-"].update(value=False)
             window["-COMP_REPORT-"].update(warning)
             update_comparison_star_list(window, detection, set(), disabled=True)
             for key in control_keys:
@@ -1567,10 +1633,13 @@ def update_comparison_tab(window: sg.Window, detection: Optional[AijFluxDetectio
         if active_stars is None:
             active_stars = set(detection.comparison_ids)
         update_comparison_star_list(window, detection, active_stars, disabled=False)
+        update_comparison_diagnostic_controls(window, {}, "")
         for key in control_keys:
             window[key].update(disabled=False)
+        window["-COMP_DIAG_STAR-"].update(disabled=True)
+        window["-COMP_PLOT_DIAG-"].update(disabled=True)
         window["-COMP_REPORT-"].update(
-            "Ready. Choose a target/check star and run the comparison-star optimiser.\n"
+            "Ready. Choose a target/check star and run the comparison-star optimizer.\n"
             "For exoplanet work, Target light curve mode masks the expected transit when a catalogue ephemeris is available."
         )
     except Exception:
@@ -1581,7 +1650,7 @@ def add_comparison_optimisation_columns(
     df: pd.DataFrame,
     result: ComparisonOptimisationResult,
 ) -> pd.DataFrame:
-    """Add optimiser output columns without removing existing data."""
+    """Add optimizer output columns without removing existing data."""
     comp_columns = [
         "PhotoCurve_compopt_time",
         "PhotoCurve_compopt_flux",
@@ -1623,6 +1692,128 @@ def set_comparison_output_columns(window: sg.Window, values: Dict[str, object]) 
     return plot_values
 
 
+
+
+def _comp_diag_flux_column(star_id: str) -> str:
+    """Return the generated flux column name for one comparison diagnostic."""
+    safe_id = str(star_id).strip().replace(" ", "_")
+    return f"PhotoCurve_compdiag_{safe_id}_flux"
+
+
+def _comp_diag_err_column(star_id: str) -> str:
+    """Return the generated error column name for one comparison diagnostic."""
+    safe_id = str(star_id).strip().replace(" ", "_")
+    return f"PhotoCurve_compdiag_{safe_id}_err"
+
+
+def _comp_diag_ensemble_column(star_id: str) -> str:
+    """Return the generated ensemble column name for one comparison diagnostic."""
+    safe_id = str(star_id).strip().replace(" ", "_")
+    return f"PhotoCurve_compdiag_{safe_id}_ensemble"
+
+
+def add_comparison_diagnostic_columns(
+    df: pd.DataFrame,
+    x: np.ndarray,
+    diagnostics: Dict[str, ComparisonDiagnosticCurve],
+) -> pd.DataFrame:
+    """Add leave-one-out comparison-star diagnostic columns to the table."""
+    remove_columns = [
+        column for column in df.columns
+        if str(column) == "PhotoCurve_compdiag_time" or str(column).startswith("PhotoCurve_compdiag_")
+    ]
+    base = df.drop(columns=remove_columns, errors="ignore")
+    if not diagnostics:
+        return base.copy()
+
+    output: Dict[str, np.ndarray] = {"PhotoCurve_compdiag_time": np.asarray(x, dtype=float)}
+    for star_id, diagnostic in diagnostics.items():
+        output[_comp_diag_flux_column(star_id)] = np.asarray(diagnostic.flux, dtype=float)
+        output[_comp_diag_err_column(star_id)] = np.asarray(diagnostic.flux_err, dtype=float)
+        output[_comp_diag_ensemble_column(star_id)] = np.asarray(diagnostic.ensemble, dtype=float)
+    return pd.concat([base, pd.DataFrame(output, index=base.index)], axis=1).copy()
+
+
+def update_comparison_diagnostic_controls(
+    window: sg.Window,
+    diagnostics: Dict[str, ComparisonDiagnosticCurve],
+    selected_star: str = "",
+) -> str:
+    """Update diagnostic-star controls and return the selected diagnostic star."""
+    stars = sorted(diagnostics.keys())
+    selected_star = str(selected_star or "").strip()
+    if selected_star not in stars:
+        selected_star = stars[0] if stars else ""
+    try:
+        window["-COMP_DIAG_STAR-"].update(values=stars, value=selected_star, disabled=not bool(stars))
+        window["-COMP_PLOT_DIAG-"].update(disabled=not bool(stars))
+    except Exception:
+        pass
+    return selected_star
+
+
+def set_comparison_diagnostic_output_columns(
+    window: sg.Window,
+    values: Dict[str, object],
+    star_id: str,
+) -> Dict[str, object]:
+    """Select one comparison-star diagnostic curve in the Data tab."""
+    star_id = str(star_id).strip()
+    selection = {
+        "-XCOL-": "PhotoCurve_compdiag_time",
+        "-YCOL-": _comp_diag_flux_column(star_id),
+        "-YERRCOL-": _comp_diag_err_column(star_id),
+        "-MODEL_COL-": NONE_COL,
+        "-RES_COL-": NONE_COL,
+        "-RESERR_COL-": NONE_COL,
+        "-YLABEL-": f"{star_id} relative flux",
+    }
+    for key, value in selection.items():
+        if key.startswith("-") and key.endswith("-") and key != "-YLABEL-":
+            try:
+                window[key].update(value=value)
+            except Exception:
+                pass
+        elif key == "-YLABEL-":
+            try:
+                window[key].update(value=value)
+            except Exception:
+                pass
+    plot_values = dict(values)
+    plot_values.update(selection)
+    return plot_values
+
+
+def build_current_comparison_diagnostics(
+    df: pd.DataFrame,
+    detection: AijFluxDetection,
+    active_stars: set[str],
+    values: Dict[str, object],
+) -> Tuple[np.ndarray, Dict[str, ComparisonDiagnosticCurve]]:
+    """Build comparison-star diagnostics using the current time column and subset."""
+    x_col = _get_comp_x_column(values, detection, df)
+    x = to_numeric_array(df, x_col)
+    if x is None:
+        raise ValueError("The selected comparison-star time column is not numeric.")
+    polynomial_order = max(0, min(2, parse_int(values.get("-COMP_POLY_ORDER-", 1), 1)))
+    diagnostics = build_comparison_diagnostics(
+        df,
+        detection,
+        x,
+        selected_comparisons=sorted(active_stars),
+        polynomial_order=polynomial_order,
+    )
+    return x, diagnostics
+
+
+def compose_comparison_report(
+    main_report: str,
+    diagnostics: Dict[str, ComparisonDiagnosticCurve],
+) -> str:
+    """Append comparison-star diagnostic information to the main report."""
+    if main_report:
+        return main_report.rstrip() + "\n\n" + format_comparison_diagnostics_report(diagnostics)
+    return format_comparison_diagnostics_report(diagnostics)
 
 def _parse_detrend_regressor_from_display(item: str) -> str:
     """Extract a detrending regressor name from a listbox label."""
@@ -1680,6 +1871,7 @@ def update_detrending_tab(
     window: sg.Window,
     detection: Optional[DetrendRegressorDetection],
     active_regressors: Optional[set[str]] = None,
+    transit_fit_available: bool = False,
 ) -> None:
     """Enable or disable the photometric detrending controls."""
     control_keys = [
@@ -1697,6 +1889,7 @@ def update_detrending_tab(
         # "-DET_UPDATE_FLIP_MARKER-",
         "-DET_FLIP_MODE-",
         "-DET_SHOW_FLIP_MARKER-",
+        "-DET_USE_TRANSIT_MODEL-",
         "-DET_SEND_TO_DATA-",
         "-DET_SHOW_POPUP-",
         "Run detrending",
@@ -1731,10 +1924,26 @@ def update_detrending_tab(
         update_detrend_regressor_list(window, detection, active_regressors, disabled=False)
         for key in control_keys:
             window[key].update(disabled=False)
+        if not bool(transit_fit_available):
+            try:
+                window["-DET_USE_TRANSIT_MODEL-"].update(value=False, disabled=True)
+            except Exception:
+                pass
         window["-DET_REPORT-"].update(
             "Ready. No detrending regressor is active by default. "
             "Select columns manually, or press Suggested to use the automatically recommended regressors."
         )
+    except Exception:
+        pass
+
+
+def update_detrend_fit_model_control(window: sg.Window, detection: Optional[DetrendRegressorDetection], last_transit_result) -> None:
+    """Enable model-aware detrending only after a valid transit fit exists."""
+    available = bool(detection is not None and detection.compatible and last_transit_result is not None)
+    try:
+        window["-DET_USE_TRANSIT_MODEL-"].update(disabled=not available)
+        if not available:
+            window["-DET_USE_TRANSIT_MODEL-"].update(value=False)
     except Exception:
         pass
 
@@ -1860,7 +2069,7 @@ def main() -> None:
         finalize=True,
         icon=icon_path,
     )
-
+    center_window(window)
     df: Optional[pd.DataFrame] = None
     original_df: Optional[pd.DataFrame] = None
     original_column_selection: Optional[Dict[str, str]] = None
@@ -1875,6 +2084,7 @@ def main() -> None:
     aij_flux_detection: Optional[AijFluxDetection] = None
     last_comp_report: Optional[str] = None
     last_comp_result: Optional[ComparisonOptimisationResult] = None
+    last_comp_diagnostics: Dict[str, ComparisonDiagnosticCurve] = {}
     current_photometry_file_path: Optional[str] = None
     detrend_detection: Optional[DetrendRegressorDetection] = None
     detrend_active_regressors: set[str] = set()
@@ -1897,6 +2107,7 @@ def main() -> None:
 
     update_comparison_tab(window, None)
     update_detrending_tab(window, None)
+    update_detrend_fit_model_control(window, None, None)
     update_manual_point_controls(window, manual_reject_indices, manual_keep_indices)
 
     #Handling windows peculiarities: DPI awareness and mouse over buttons
@@ -1947,6 +2158,7 @@ def main() -> None:
                 last_stats_blocks = []
                 last_comp_report = None
                 last_comp_result = None
+                last_comp_diagnostics = {}
                 last_detrend_report = None
                 last_detrend_result = None
                 last_detrend_input_selection = None
@@ -1968,6 +2180,7 @@ def main() -> None:
                 )
                 detrend_active_regressors = set()
                 update_detrending_tab(window, detrend_detection, detrend_active_regressors)
+                update_detrend_fit_model_control(window, detrend_detection, last_transit_result)
 
                 window["-NROWS-"].update(str(len(df)))
                 window["-NCOLS-"].update(str(len(df.columns)))
@@ -2014,6 +2227,7 @@ def main() -> None:
                     last_stats_blocks = []
                     last_comp_report = None
                     last_comp_result = None
+                    last_comp_diagnostics = {}
                     last_detrend_report = None
                     last_detrend_result = None
                     last_detrend_input_selection = None
@@ -2035,6 +2249,7 @@ def main() -> None:
                     )
                     detrend_active_regressors = set()
                     update_detrending_tab(window, detrend_detection, detrend_active_regressors)
+                    update_detrend_fit_model_control(window, detrend_detection, last_transit_result)
 
                     window["-NROWS-"].update(str(len(df)))
                     window["-NCOLS-"].update(str(len(df.columns)))
@@ -2171,7 +2386,7 @@ def main() -> None:
                 try:
                     window["-DET_FLIP_ACTIVE-"].update(value=False)
                     window["-DET_FLIP_FRAC-"].update(value="")
-                    window["-DET_FLIP_MODE-"].update(value="Step only")
+                    window["-DET_FLIP_MODE-"].update(value="Robust level matching")
                     window["-DET_SHOW_FLIP_MARKER-"].update(value=True)
                 except Exception:
                     pass
@@ -2186,7 +2401,7 @@ def main() -> None:
                 reset_values["-TR_SET_MODEL_COLUMNS-"] = True
                 reset_values["-DET_FLIP_ACTIVE-"] = False
                 reset_values["-DET_FLIP_FRAC-"] = ""
-                reset_values["-DET_FLIP_MODE-"] = "Step only"
+                reset_values["-DET_FLIP_MODE-"] = "Robust level matching"
                 reset_values["-DET_SHOW_FLIP_MARKER-"] = True
                 reset_values["-MANUAL_REJECT_INDICES-"] = ""
                 reset_values["-MANUAL_KEEP_INDICES-"] = ""
@@ -2197,6 +2412,7 @@ def main() -> None:
                 last_stats_blocks = []
                 last_comp_report = None
                 last_comp_result = None
+                last_comp_diagnostics = {}
                 last_detrend_report = None
                 last_detrend_result = None
                 last_detrend_input_selection = None
@@ -2212,10 +2428,11 @@ def main() -> None:
                 )
                 detrend_active_regressors = set()
                 update_detrending_tab(window, detrend_detection, detrend_active_regressors)
+                update_detrend_fit_model_control(window, detrend_detection, last_transit_result)
                 try:
                     window["-DET_FLIP_ACTIVE-"].update(value=False)
                     window["-DET_FLIP_FRAC-"].update(value="")
-                    window["-DET_FLIP_MODE-"].update(value="Step only")
+                    window["-DET_FLIP_MODE-"].update(value="Robust level matching")
                     window["-DET_SHOW_FLIP_MARKER-"].update(value=True)
                 except Exception:
                     pass
@@ -2367,6 +2584,7 @@ def main() -> None:
                 )
                 detrend_active_regressors = set()
                 update_detrending_tab(window, detrend_detection, detrend_active_regressors)
+                update_detrend_fit_model_control(window, detrend_detection, last_transit_result)
                 window["-DET_REPORT-"].update(
                     "Detrending cleared. The light curve has been restored to the source columns used before detrending."
                 )
@@ -2447,6 +2665,22 @@ def main() -> None:
                             "Enter a value such as .771 for JD_UTC = 2461203.771."
                         )
 
+                transit_model_for_detrending = None
+                use_fit_model_for_detrending = bool(values.get("-DET_USE_TRANSIT_MODEL-", False))
+                if use_fit_model_for_detrending:
+                    if last_transit_result is None:
+                        raise ValueError(
+                            "Model-aware detrending requires a previous transit fit. "
+                            "Press Run transit model first, then run detrending again."
+                        )
+                    candidate_model = np.asarray(getattr(last_transit_result, "fit_transit_model", []), dtype=float)
+                    if candidate_model.shape != np.asarray(y, dtype=float).shape:
+                        raise ValueError(
+                            "The latest transit model does not match the current light curve length. "
+                            "Run the transit model again before using model-aware detrending."
+                        )
+                    transit_model_for_detrending = candidate_model
+
                 last_detrend_result = apply_photometric_detrending(
                     df,
                     x,
@@ -2460,7 +2694,8 @@ def main() -> None:
                     robust_sigma=float(robust_sigma),
                     robust_iterations=robust_iterations,
                     meridian_flip_time=flip_time,
-                    meridian_flip_mode=str(values.get("-DET_FLIP_MODE-", "Step only")),
+                    meridian_flip_mode=str(values.get("-DET_FLIP_MODE-", "Robust level matching")),
+                    transit_model=transit_model_for_detrending,
                 )
                 last_detrend_report = (
                     last_detrend_result.report
@@ -2468,6 +2703,7 @@ def main() -> None:
                     + f"\nSource: {detrend_source_note}"
                     + f"\nTime column: {x_col}"
                     + f"\nFlux column: {y_col}"
+                    + ("\nTransit fit model considered for baseline: yes" if use_fit_model_for_detrending else "\nTransit fit model considered for baseline: no")
                     + f"\nError column: {yerr_col if yerr_col != NONE_COL else 'none'}"
                     + (f"\nMeridian flip full time used: {last_detrend_result.meridian_flip_time:.8f}" if getattr(last_detrend_result, 'meridian_flip_enabled', False) else "")
                 )
@@ -2497,8 +2733,37 @@ def main() -> None:
 
                 current_fig, fig_agg = redraw_plot(window, fig_agg, df, plot_values)
 
+                if use_fit_model_for_detrending:
+                    window["-STATUS-"].update("Detrending complete. Re-running transit model on the detrended curve...")
+                    try:
+                        window.write_event_value("Run transit model", None)
+                    except Exception:
+                        pass
+
             except Exception as exc:
                 sg.popup_error(f"Could not run photometric detrending:\n{exc}")
+
+        if event in ("-COMP_DIAG_STAR-", "-COMP_PLOT_DIAG-"):
+            if df is None or not last_comp_diagnostics:
+                continue
+            try:
+                selected_diag_star = str(values.get("-COMP_DIAG_STAR-", "")).strip()
+                if selected_diag_star not in last_comp_diagnostics:
+                    selected_diag_star = update_comparison_diagnostic_controls(window, last_comp_diagnostics, selected_diag_star)
+                if bool(values.get("-COMP_PLOT_DIAG-", False)) and selected_diag_star in last_comp_diagnostics:
+                    plot_values = set_comparison_diagnostic_output_columns(window, values, selected_diag_star)
+                elif last_comp_result is not None and bool(values.get("-COMP_SEND_TO_DATA-", True)):
+                    plot_values = set_comparison_output_columns(window, values)
+                    pre_transit_column_selection = current_column_selection(plot_values)
+                else:
+                    plot_values = dict(values)
+                current_fig, fig_agg = redraw_plot(window, fig_agg, df, plot_values)
+                if bool(values.get("-COMP_PLOT_DIAG-", False)) and selected_diag_star:
+                    window["-STATUS-"].update(f"Showing comparison diagnostic curve for {selected_diag_star}.")
+                else:
+                    window["-STATUS-"].update("Comparison diagnostic display disabled.")
+            except Exception as exc:
+                window["-STATUS-"].update(f"Comparison diagnostic display failed: {exc}")
 
         if event in ("-COMP_STAR_LIST-", "-COMP_SELECT_ALL-", "-COMP_SELECT_NONE-", "-COMP_TARGET-", "-COMP_CHECK-", "-COMP_MODE-"):
             if df is None or aij_flux_detection is None or not aij_flux_detection.compatible:
@@ -2529,6 +2794,8 @@ def main() -> None:
                 update_comparison_star_list(window, aij_flux_detection, comp_active_stars, disabled=False)
 
                 if not comp_active_stars:
+                    last_comp_diagnostics = {}
+                    update_comparison_diagnostic_controls(window, last_comp_diagnostics, "")
                     window["-COMP_REPORT-"].update(
                         "No comparison star is active. Select at least one star or press All."
                     )
@@ -2547,12 +2814,28 @@ def main() -> None:
                     exoplanet_catalogue,
                 )
                 last_comp_report = last_comp_result.report
+
+                diag_x, last_comp_diagnostics = build_current_comparison_diagnostics(
+                    df,
+                    aij_flux_detection,
+                    comp_active_stars,
+                    values,
+                )
+                selected_diag_star = update_comparison_diagnostic_controls(
+                    window,
+                    last_comp_diagnostics,
+                    str(values.get("-COMP_DIAG_STAR-", "")),
+                )
+
                 df = add_comparison_optimisation_columns(df, last_comp_result)
+                df = add_comparison_diagnostic_columns(df, diag_x, last_comp_diagnostics)
                 update_combo_values(window, numeric_columns(df))
-                window["-COMP_REPORT-"].update(last_comp_report)
+                window["-COMP_REPORT-"].update(compose_comparison_report(last_comp_report, last_comp_diagnostics))
 
                 plot_values = dict(values)
-                if bool(values.get("-COMP_SEND_TO_DATA-", True)):
+                if bool(values.get("-COMP_PLOT_DIAG-", False)) and selected_diag_star in last_comp_diagnostics:
+                    plot_values = set_comparison_diagnostic_output_columns(window, values, selected_diag_star)
+                elif bool(values.get("-COMP_SEND_TO_DATA-", True)):
                     plot_values = set_comparison_output_columns(window, values)
                     pre_transit_column_selection = current_column_selection(plot_values)
 
@@ -2645,7 +2928,7 @@ def main() -> None:
             except Exception as exc:
                 sg.popup_error(f"Could not edit point manually:\n{exc}")
 
-        if event == "Run comp optimiser":
+        if event == "Run comp optimizer":
             if df is None:
                 sg.popup_error("Load a table first.")
                 continue
@@ -2706,33 +2989,49 @@ def main() -> None:
                 last_comp_report = last_comp_result.report
                 comp_active_stars = set(last_comp_result.selected_comparisons)
 
+                last_comp_diagnostics = build_comparison_diagnostics(
+                    df,
+                    aij_flux_detection,
+                    x,
+                    selected_comparisons=sorted(comp_active_stars),
+                    polynomial_order=polynomial_order,
+                )
+                selected_diag_star = update_comparison_diagnostic_controls(
+                    window,
+                    last_comp_diagnostics,
+                    str(values.get("-COMP_DIAG_STAR-", "")),
+                )
+
                 df = add_comparison_optimisation_columns(df, last_comp_result)
+                df = add_comparison_diagnostic_columns(df, x, last_comp_diagnostics)
                 cols = numeric_columns(df)
                 update_combo_values(window, cols)
                 update_comparison_star_list(window, aij_flux_detection, comp_active_stars, disabled=False)
-                window["-COMP_REPORT-"].update(last_comp_report)
+                window["-COMP_REPORT-"].update(compose_comparison_report(last_comp_report, last_comp_diagnostics))
 
                 plot_values = dict(values)
-                if bool(values.get("-COMP_SEND_TO_DATA-", True)):
+                if bool(values.get("-COMP_PLOT_DIAG-", False)) and selected_diag_star in last_comp_diagnostics:
+                    plot_values = set_comparison_diagnostic_output_columns(window, values, selected_diag_star)
+                elif bool(values.get("-COMP_SEND_TO_DATA-", True)):
                     plot_values = set_comparison_output_columns(window, values)
                     pre_transit_column_selection = current_column_selection(plot_values)
 
                 window["-STATUS-"].update(
-                    f"Comparison optimiser: selected {len(last_comp_result.selected_comparisons)} star(s); "
+                    f"Comparison optimizer: selected {len(last_comp_result.selected_comparisons)} star(s); "
                     f"RMS = {last_comp_result.optimised_metric.rms_ppt:.2f} ppt"
                 )
 
                 if bool(values.get("-COMP_SHOW_POPUP-", True)):
                     sg.popup_scrolled(
-                        last_comp_report,
-                        title="Comparison-star optimiser",
+                        compose_comparison_report(last_comp_report, last_comp_diagnostics),
+                        title="Comparison-star optimizer",
                         size=(92, 36),
                     )
 
                 current_fig, fig_agg = redraw_plot(window, fig_agg, df, plot_values)
 
             except Exception as exc:
-                sg.popup_error(f"Could not run comparison-star optimiser:\n{exc}")
+                sg.popup_error(f"Could not run comparison-star optimizer:\n{exc}")
 
         if event == "Run transit model":
             if df is None:
@@ -2874,6 +3173,7 @@ def main() -> None:
 
                 # Refresh the plot automatically. If the transit-fit display
                 # switch is off, the original column mapping is used instead.
+                update_detrend_fit_model_control(window, detrend_detection, last_transit_result)
                 current_fig, fig_agg = redraw_plot(window, fig_agg, df, plot_values)
 
             except Exception as exc:

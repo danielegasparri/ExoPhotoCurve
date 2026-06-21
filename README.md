@@ -34,7 +34,7 @@
 - Python 3.10+
 - Screen resolution of at least 1600x900 px. Optimal resolution: 1920X1080.
 - The following dependencies will be automatically installed: numpy, pandas, matplotlib, scipy, astropy, astropy-iers-data, batman-package
-- A 64 bit Standalone (no Python required) Windows installer is also available in the release package
+- A 64 bit standalone Windows installer (no Python required) is also available in the release package
 
 ## Installation
 

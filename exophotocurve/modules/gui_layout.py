@@ -41,14 +41,14 @@ def make_layout() -> List[List[sg.Element]]:
     file_frame = [
         [
             sg.Button("Build light curve", button_color= ('black','light blue'),tooltip='Construct your lightcurve here starting from a calibrated and aligned image sequence in fit format'),
-            sg.Text("Or Load a light curve"),
+            sg.Text("Or Load a light curve", tooltip='If you already have a light curve file, browse it here, click Load table\nand proceed to visualization and analysis\n You can directly upload an AstroImageJ table or any table containing\nthe data and names of the columns, WITHOUT the # character'),
             sg.Input(key="-FILE-", size=(17, 1)),
             sg.FileBrowse(
                 button_text="Browse",
                 file_types=(
                     ("Text files", "*.txt *.dat *.csv *.tsv"),
                     ("All files", "*.*"),
-                ), tooltip='If you already have a lightcurve file, browse it here, click Load table\nand proceed to visualization and analysis\n You can directly upload an AstroImageJ table or any table containing the data and names of the columns, WITHOUT the # character'),
+                ), tooltip='Browse your light curve table here'),
             sg.Button("Load table", tooltip='Load your lightcurve text file that you have just browsed'),
         ],
         [
@@ -91,7 +91,7 @@ def make_layout() -> List[List[sg.Element]]:
             
         [
             sg.Text(
-                "After loading a table, PhotoCurve Lab tries to select the final detrended columns automatically.",
+                "After loading a table, ExoPhotoCurve tries to select the right columns automatically.",
                 size=(54, 2),
             )
         ],
@@ -225,7 +225,7 @@ def make_layout() -> List[List[sg.Element]]:
 
     cleaning_tab = [
         [
-            sg.Checkbox("Enable sigma clipping", default=False, key="-CLEAN_ACTIVE-", tooltip='Enable and set the clipping of outliers. Once activated, press the Plot / update button to see the results'),
+            sg.Checkbox("Enable sigma clipping", default=False, key="-CLEAN_ACTIVE-", tooltip='Enable and set the clipping of outliers. Once activated, press the Plot / update button to see the results\nor run transit model again'),
             sg.Text("Target"),
             sg.Combo(CLEANING_TARGETS, default_value="Residuals", key="-CLEAN_TARGET-", size=(17, 1), readonly=True),
         ],
@@ -553,10 +553,7 @@ def make_layout() -> List[List[sg.Element]]:
                 sg.Tab("Stats", stats_tab),
                 sg.Tab("Comp stars", comp_tab),
                 sg.Tab("Cleaning", cleaning_tab),
-                # sg.Tab("Comp stars", comp_tab),
                 sg.Tab("Detrend", detrend_tab),
-                # sg.Tab("Stats", stats_tab),
-                # sg.Tab("Comp stars", comp_tab),
                 sg.Tab("Transit modeling", transit_tab),
             ]
         ],
@@ -591,7 +588,7 @@ def make_layout() -> List[List[sg.Element]]:
 
 
     control_column = [
-        [sg.Frame("Start here: build a ligh curve or load a light curve file", file_frame, font=("Helvetica", 13, 'bold'))],
+        [sg.Frame("Start here: build a light curve or load a light curve file", file_frame, font=("Helvetica", 13, 'bold'))],
         [control_tabs],
         [sg.HorizontalSeparator()],
         buttons_row_1,

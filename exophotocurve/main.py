@@ -2143,8 +2143,8 @@ def main() -> None:
     try:
         exoplanet_catalogue = load_catalogue_into_window(
             window,
-            str(default_catalogue_path()),
-            source_label="NASA",
+            str(default_exoclock_catalogue_path()),
+            source_label="ExoClock",
         )
     except Exception as exc:
         window["-STATUS-"].update(f"Transit catalogue not loaded: {exc}")

@@ -1526,7 +1526,7 @@ def _build_layout() -> List[List[sg.Element]]:
             sg.Input("0.66", key="-PHOTO_PEAK_HIGH_FRAC-", size=(5, 1), enable_events=True),
             sg.Text("Peak frames", tooltip='The number of frames of the sequence used to calculate the luminosity leveld of the selected stars\nand the automatic detection of the comparison stars\nSet zero to sample the whole sequence'),
             sg.Input("15", key="-PHOTO_PEAK_MAX_FRAMES-", size=(5, 1)),
-            sg.Button("Check peaks", key="-PHOTO_CHECK_PEAKS-", tooltip='When you move the mouse over the stars on the right, the apertures will change colors\nYellow = star too faint, Green = star with good luminosity, Red = possibly saturated star\nWhen you select a star, the aperture will maintain it''s color. This color feedback is given considering only the image you are displaying\nThis button extends the luminosity analysis to a subsample (15 by default) of images.\nIt is important to check that the stars you have selected have the right luminosity\nAfter selecting the target and all the comparison stars you want, press this button to see if some of them are not suitable foro photometry\nSet zero to extend the luminosity analysis to the whole sequence'),
+            sg.Button("Check peaks", key="-PHOTO_CHECK_PEAKS-", tooltip='When you move the mouse over the stars on the right, the apertures will change colors\nYellow = star too faint, Green = star with good luminosity, Red = possibly saturated star\nWhen you select a star, the aperture will maintain it''s color. This color feedback is given considering only the image you are displaying\nThis button extends the luminosity analysis to a subsample (15 by default) of images.\nIt is important to check that the stars you have selected have the right luminosity\nAfter selecting the target and all the comparison stars you want, press this button to see if some of them are not suitable for photometry\nSet zero to extend the luminosity analysis to the whole sequence'),
         ],
         [
             sg.Button("Auto find comps", key="-PHOTO_AUTO_FIND_COMPS-", tooltip='Automatic algorithm to select the preliminary sample of suitable comparison stars.\nSuitable stars will have the peak luminosity within the OK fraction set above\nare not contaminated by other stars and will not contain other bright stars in the sky mearurement annulus\nThis preliminary sample will be fine-tuned in the main program, in the Comp stars tab'),
@@ -1537,11 +1537,11 @@ def _build_layout() -> List[List[sg.Element]]:
             sg.Text("0 = auto", text_color="gray"),
         ],
         [
-            sg.Text("Star type", size=(10, 1)),
+            sg.Text("Star type", size=(10, 1), tooltip='This is the most important section: you have to set which type of star you are considering\nand then click on that star in the image. One target only, as many comparison stars you want'),
             sg.Radio("Target", "PHOTO_MODE", key="-PHOTO_MODE_TARGET-", default=True, tooltip='Set the aperture to your target. Only one\nThis is required also if you want to use the automatic detection of comparison stars'),
             sg.Radio("Comparison", "PHOTO_MODE", key="-PHOTO_MODE_COMP-", tooltip='Set the apertures to comparison stars, if you prefer the manual mode.\nYou can select as many stars as you want'),
             sg.Radio("Check", "PHOTO_MODE", key="-PHOTO_MODE_CHECK-", tooltip='If you want to add also a check star. Optional, and often not useful'),
-            sg.Radio("Delete", "PHOTO_MODE", key="-PHOTO_MODE_DELETE-", tooltip='To manually delete any aperture you want directly on the plot'),
+            sg.Radio("Delete", "PHOTO_MODE", key="-PHOTO_MODE_DELETE-", tooltip='To manually delete any aperture you want directly on the image\nActivate this option, then click on the aperture(s) you want to delete in the image'),
         ],
         [
             sg.Button("Delete selected", key="-PHOTO_DELETE_SELECTED-", tooltip='Select an aperture in the list and delete here'),

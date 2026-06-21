@@ -1,8 +1,8 @@
-"""Interactive aperture-photometry builder for PhotoCurve Lab.
+"""Interactive aperture-photometry builder for ExoPhotoCurve.
 
 This module intentionally behaves like a small, separate sub-program.  It
 measures simple aperture photometry on an already calibrated and aligned FITS
-sequence, then writes an AstroImageJ-like text table.  The main PhotoCurve Lab
+sequence, then writes an AstroImageJ-like text table.  The main ExoPhotoCurve
 pipeline can load that table exactly as it would load an AIJ export.
 """
 
@@ -1669,7 +1669,7 @@ def _save_apertures(path: str, session: PhotometrySession, values: Dict[str, obj
     """Save aperture definitions to JSON."""
     data = {
         "created_utc": datetime.utcnow().isoformat(timespec="seconds") + "Z",
-        "description": "PhotoCurve Lab aperture set. Coordinates are reference-frame FITS pixel coordinates.",
+        "description": "ExoPhotoCurve aperture set. Coordinates are reference-frame FITS pixel coordinates.",
         "aperture_radius": str(values.get("-PHOTO_APER_R-", "")),
         "sky_inner_radius": str(values.get("-PHOTO_SKY_IN-", "")),
         "sky_outer_radius": str(values.get("-PHOTO_SKY_OUT-", "")),
@@ -2000,7 +2000,7 @@ def run_aperture_photometry_tool(parent_window: Optional[sg.Window] = None) -> O
 
     session = PhotometrySession()
     window = sg.Window(
-        "PhotoCurve Lab - Aperture Photometry Tool",
+        "ExoPhotoCurve - Aperture Photometry Tool",
         _build_layout(),
         resizable=True,
         finalize=True,

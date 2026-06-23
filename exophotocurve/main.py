@@ -47,7 +47,7 @@ try:
     from modules.aperture_photometry_tool import run_aperture_photometry_tool
     from modules.image_reduction_tool import run_image_reduction_tool
     from modules.binning_utils import bin_light_curve
-    from modules.cleaning_utils import compute_cleaning_mask
+    from modules.cleaning_utils import compute_auto_sigma_clip_reject_indices, compute_cleaning_mask
     from modules.config_utils import apply_config, load_config, save_config
     from modules.comparison_optimizer import (
         AijFluxDetection,
@@ -99,7 +99,7 @@ except ModuleNotFoundError: #local import if executed as package
     from .modules.aperture_photometry_tool import run_aperture_photometry_tool
     from .modules.image_reduction_tool import run_image_reduction_tool
     from .modules.binning_utils import bin_light_curve
-    from .modules.cleaning_utils import compute_cleaning_mask
+    from .modules.cleaning_utils import compute_auto_sigma_clip_reject_indices, compute_cleaning_mask
     from .modules.config_utils import apply_config, load_config, save_config
     from .modules.comparison_optimizer import (
         AijFluxDetection,

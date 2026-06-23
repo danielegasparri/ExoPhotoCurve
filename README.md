@@ -7,26 +7,31 @@
 [![License](https://img.shields.io/badge/license-Non--Commercial-blue)](./LICENSE)
 
 **ExoPhotoCurve is a GUI program designed to create, inspect, correct, analyze and model photometric light curves of known exoplanet transits. It is particularly suited for follow-up observations and fast modeling using the embedded NASA and ExoClock catalogues**
+ExoPhotoCurve is fully compatible with AstroImageJ data products and saves ExoClock standard light curves, ready to be uploades.
 
-<img width="1841" height="919" alt="Screenshot 2026-06-17 191802" src="https://github.com/user-attachments/assets/2705c839-af44-40ac-9f72-b3684a8bebad" />
+<img width="1920" height="1032" alt="Screenshot 2026-06-22 020035" src="https://github.com/user-attachments/assets/c82fa60d-9b73-43d7-a652-41fb9cfad016" />
 
 
 ## Features
 
-- **Create a light curve** from calibrated and aligned FITS images via aperture differential photometry:
+- **Full reduction of raw image sequence** using rigorous scientific approach to preserve and maximize the photometric information:
+    - Calibration of raw FITS images with bas, dark and flat frames
+    - Automatic alignment handling translation, rotation and meridian flip
+    - Monochrome and color data handling. For color data, user selected channel extraction is performed without applying the debayer process
+- **Differential aperture photometry** from calibrated and aligned FITS images:
     - Automatic fits sequence recognition
     - Interactive aperture adjustment and positioning
     - Automatic visual feedback to let the user know if a target or comparison star are within the optimal linear range
     - Automatic centroid recentering on all the images of the loaded sequence
     - Saving apertures to be loaded any time you want
     - Photometry file generated compatible with AstroImageJ and automatically passed to the analysis panel
-- **Fine-tuning, analyze, and modeling light curves in ASCII or CSV format**:
+- **Light curve fine-tuning, analysis, and transit modeling**:
     - Interactive plot window updated in real time
     - Automatic or manual clipping of outliers
-    - Automatic or manual selection of the comparison stars to optimize the signal to noise of the transit
+    - Automatic or manual selection of the comparison stars to optimize the signal-to-noise of the transit
     - Detrending methods: airmass, JD_UTC, FWHM, and meridian flip correction
     - Transit modeling using the physical data of the considered extrasolar planet and comparison with the expected model, using the embedded NASA and ExoClock extrasolar planet databases. 
-    - Saving plot, statistics, diagnostics and the full recipe in order to maintain reproducibility of the results.
+    - Saving plot, statistics, diagnostics and the full recipe in order to grant reproducibility.
 
 
 ## System Requirements
@@ -54,7 +59,7 @@ Run ExoPhotoCurve using:
 exophotocurve
 ```
 
-Once launched, open the "Buld light curve" panel if you want to create your light curve, or just browse and load a light curve table. Accepted light curve format: AstroImageJ, ExoPhotoCurve, HOPS, and in general any table file either in ASCII or CSV format containing at least the time and the relative flux of the target star.
+Once launched ExoPhotoCurve, unzip the example reduced sequence of the Kelt-10b transit, open the "Build light curve" panel and start building and analyzing the light curve
 
 ## License
 

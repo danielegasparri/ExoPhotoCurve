@@ -40,16 +40,17 @@ def make_layout() -> List[List[sg.Element]]:
     # ------------------------------------------------------------------
     file_frame = [
         [
-            sg.Button("Build light curve", button_color= ('black','light blue'),tooltip='Construct your lightcurve here starting from a calibrated and aligned image sequence in fit format'),
-            sg.Text("Or Load a light curve", tooltip='If you already have a light curve file, browse it here, click Load table\nand proceed to visualization and analysis\n You can directly upload an AstroImageJ table or any table containing\nthe data and names of the columns, WITHOUT the # character'),
-            sg.Input(key="-FILE-", size=(17, 1)),
+            sg.Button("Reduce img", button_color=('black', 'light green'), tooltip='Calibrate and align a raw FITS sequence scientifically: bias/dark/flat/dark-flat correction, Bayer channel extraction, and meridian-flip-safe registration'),
+            sg.Button("Build LC", button_color= ('black','light blue'),tooltip='Construct your lightcurve here starting from a calibrated and aligned image sequence in fit format'),
+            sg.Text("Load LC", tooltip='If you already have a light curve file, browse it here, click Load\nand proceed to visualization and analysis\n You can directly upload an AstroImageJ table or any table containing\nthe data and names of the columns, WITHOUT the # character'),
+            sg.Input(key="-FILE-", size=(25, 1)),
             sg.FileBrowse(
                 button_text="Browse",
                 file_types=(
                     ("Text files", "*.txt *.dat *.csv *.tsv"),
                     ("All files", "*.*"),
                 ), tooltip='Browse your light curve table here'),
-            sg.Button("Load table", tooltip='Load your lightcurve text file that you have just browsed'),
+            sg.Button("Load", tooltip='Load your lightcurve text file that you have just browsed'),
         ],
         [
             sg.Text("Delimiter", size=(13, 1)),
@@ -86,6 +87,14 @@ def make_layout() -> List[List[sg.Element]]:
                 default=False,
                 key="-EXPORT_REJECTED_POINTS-",
                 tooltip="If disabled, Save curve writes only the points currently kept by manual/sigma cleaning and the latest transit-fit mask.",
+            ),
+        ],
+        [
+            sg.Checkbox(
+                "Also save simple ExoClock/HOPS file",
+                default=True,
+                key="-EXPORT_SIMPLE_EXOCLOCK-",
+                tooltip="When Save curve is used, also write a compact TXT file with only JD_UTC, flux and flux_error when JD_UTC is available.",
             ),
         ],
             
@@ -225,7 +234,13 @@ def make_layout() -> List[List[sg.Element]]:
 
     cleaning_tab = [
         [
-            sg.Checkbox("Enable sigma clipping", default=False, key="-CLEAN_ACTIVE-", tooltip='Enable and set the clipping of outliers. Once activated, press the Plot / update button to see the results\nor run transit model again'),
+            sg.Button("Apply sigma clipping", tooltip='Run sigma clipping once and lock the newly rejected points.'),
+            sg.Button("Reset auto clipping", tooltip='Restore all points rejected by automatic sigma clipping.'),
+            sg.Text("auto 0", key="-AUTO_REJECT_COUNT-", size=(8, 1)),
+            sg.Checkbox("", default=False, key="-CLEAN_ACTIVE-", visible=False),
+            sg.Input("", key="-AUTO_REJECT_INDICES-", visible=False),
+        ],
+        [
             sg.Text("Target"),
             sg.Combo(CLEANING_TARGETS, default_value="Residuals", key="-CLEAN_TARGET-", size=(17, 1), readonly=True),
         ],
@@ -277,7 +292,7 @@ def make_layout() -> List[List[sg.Element]]:
         ],
         [
             sg.Text(
-                "For transits, clip residuals or light curve - model rather than the raw light curve. Use click-edit to reject or restore individual plotted points.",
+                "For transits, clip residuals or light curve - model. Applied auto-clipped points stay excluded until Reset auto clipping; click-edit can reject or restore individual points.",
                 size=(54, 3),
             )
         ],
@@ -344,11 +359,19 @@ def make_layout() -> List[List[sg.Element]]:
         ],
 
         [
-            sg.Checkbox("Consider fit model", default=False, key="-DET_USE_TRANSIT_MODEL-", disabled=True, tooltip="Use the latest transit fit model when estimating the detrending baseline."),
+            sg.Checkbox("Consider fit model", default=False, key="-DET_USE_TRANSIT_MODEL-", disabled=True, enable_events=True, tooltip="Use the latest transit fit model when estimating the detrending baseline. If iterative mode is selected, detrending and transit fitting are repeated until objective convergence criteria are met or the maximum number of iterations is reached."),
             sg.Checkbox("Send detrended curve to Data/Transit", default=True, key="-DET_SEND_TO_DATA-", disabled=True, tooltip='Using the result of detrend as the new light curve'),
             sg.Checkbox("Show popup", default=True, key="-DET_SHOW_POPUP-", disabled=True, tooltip='Showing a pop-up info containing the results of detrending once you press the Run detrend button'),
         ],
-        [sg.Button("Run detrending", disabled=True, tooltip='Well, this is self-explicative: run the detrend(s) activated, including the meridian flip correction'), sg.Button("Clear detrending", disabled=True, tooltip='Clear all the detrending performed. Also the meridian flip correction will be cleared but the relative checkbox will stay activated!')],
+        [
+            sg.Text("Model-aware mode", size=(14, 1)),
+            sg.Combo(["Single pass", "Iterate to convergence"], default_value="Single pass", key="-DET_MODEL_ITER_MODE-", size=(19, 1), readonly=True, disabled=True, tooltip="Used only when Consider fit model is active. Single pass reproduces the old one-pass behavior. Iterate to convergence repeats detrending + transit fitting until Tmid, Rp/Rs, RMS and baseline are stable."),
+            sg.Text("max"),
+            sg.Input("10", key="-DET_MODEL_MAX_ITER-", size=(4, 1), disabled=True, tooltip="Maximum number of model-aware detrending/refit iterations."),
+            sg.Text("tol %"),
+            sg.Input("0.10", key="-DET_MODEL_TOL_PCT-", size=(5, 1), disabled=True, tooltip="Convergence tolerance in percent for Rp/Rs and RMS changes. Tmid and baseline also use fixed conservative absolute tolerances reported in the log."),
+        ],
+        [sg.Button("Run detrending", disabled=True, tooltip='Run the detrending selected in this tab, including meridian flip correction and optional model-aware convergence.'), sg.Button("Clear detrending", disabled=True, tooltip='Clear all the detrending performed. Also the meridian flip correction will be cleared but the relative checkbox will stay activated!')],
         [
             sg.Multiline(
                 "",
@@ -552,9 +575,10 @@ def make_layout() -> List[List[sg.Element]]:
                 sg.Tab("Binning", binning_tab),
                 sg.Tab("Stats", stats_tab),
                 sg.Tab("Comp stars", comp_tab),
-                sg.Tab("Cleaning", cleaning_tab),
+                # sg.Tab("Cleaning", cleaning_tab),
                 sg.Tab("Detrend", detrend_tab),
                 sg.Tab("Transit modeling", transit_tab),
+                sg.Tab("Cleaning", cleaning_tab),
             ]
         ],
         expand_x=False,
@@ -609,8 +633,8 @@ def make_layout() -> List[List[sg.Element]]:
 
     return [
         [sg.Menu([
-        ['&File', ['&Build light curve', '&Save figure', 'Save stats', 'Save model results', 'Save settings', 'Load settings', 'Reset view/data', 'Save curve', 'Save recipe',  'E&xit']],
-        ['&Data', ['Load table', 'Plot / update']],
+        ['&File', ['&Reduce img', '&Build LC', '&Save figure', 'Save stats', 'Save model results', 'Save settings', 'Load settings', 'Reset view/data', 'Save curve', 'Save recipe',  'E&xit']],
+        ['&Data', ['Load', 'Plot / update']],
         ['&Comp stars', ['Run comp optimizer']],
         ['Detrend', ['Run detrending', 'Clear detrending']],
         ['Transit modeling', ['Use NASA', 'Use ExoClock', 'Load catalogue', 'Run transit model']],

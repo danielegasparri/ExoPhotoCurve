@@ -45,6 +45,7 @@ try:
 
     from modules.axis_utils import transform_x_axis
     from modules.aperture_photometry_tool import run_aperture_photometry_tool
+    from modules.image_reduction_tool import run_image_reduction_tool
     from modules.binning_utils import bin_light_curve
     from modules.cleaning_utils import compute_cleaning_mask
     from modules.config_utils import apply_config, load_config, save_config
@@ -96,6 +97,7 @@ except ModuleNotFoundError: #local import if executed as package
 
     from .modules.axis_utils import transform_x_axis
     from .modules.aperture_photometry_tool import run_aperture_photometry_tool
+    from .modules.image_reduction_tool import run_image_reduction_tool
     from .modules.binning_utils import bin_light_curve
     from .modules.cleaning_utils import compute_cleaning_mask
     from .modules.config_utils import apply_config, load_config, save_config
@@ -145,7 +147,6 @@ except ModuleNotFoundError: #local import if executed as package
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 icon_path = os.path.join(BASE_DIR, "ExoPhotoCurve.ico")
 
-
 def center_window(window, margin=20):
     """
     Center a PySimpleGUI window on the current screen and make sure
@@ -193,8 +194,7 @@ def center_window(window, margin=20):
 
     except Exception as e:
         print(f"Warning: could not center window: {e}")
-        
-        
+
 # Simple function to open the PDF manual
 def open_manual():
     try:
@@ -486,6 +486,20 @@ def clear_transit_diagnostic_columns(df: pd.DataFrame) -> pd.DataFrame:
         or str(column).startswith("PhotoCurve_compdiag_")
     ]
     return df.loc[:, keep_columns].copy()
+
+
+def clear_downstream_analysis_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """Remove products that become invalid when the light curve changes.
+
+    A new comparison-star selection changes the differential light curve itself.
+    Therefore any later products computed from the previous curve are no longer
+    scientifically valid: photometric detrending, transit-model columns,
+    residuals, baseline aliases, expected/calculated transit markers and other
+    downstream PhotoCurve diagnostics are removed.  The upstream comparison-star
+    columns are preserved because they are regenerated immediately after the
+    selection change.
+    """
+    return clear_transit_diagnostic_columns(df)
 
 def transit_display_selection(display_mode: str) -> Dict[str, str]:
     """Return the column mapping used to display the current transit result."""
@@ -781,6 +795,7 @@ def build_processed_light_curve_export(
     photometry_file_path: Optional[str],
     catalogue_path: object,
     last_transit_result,
+    auto_reject_indices: set[int],
     manual_reject_indices: set[int],
     manual_keep_indices: set[int],
 ) -> Tuple[pd.DataFrame, Dict[str, object]]:
@@ -892,8 +907,10 @@ def build_processed_light_curve_export(
     residuals = to_numeric_array(df, res_col)
 
     export_values = dict(values)
+    export_values["-AUTO_REJECT_INDICES-"] = _format_index_set(auto_reject_indices)
     export_values["-MANUAL_REJECT_INDICES-"] = _format_index_set(manual_reject_indices)
     export_values["-MANUAL_KEEP_INDICES-"] = _format_index_set(manual_keep_indices)
+    export_values["-CLEAN_ACTIVE-"] = False
 
     if x is not None and len(x) == n_rows:
         cleaning = compute_cleaning_mask(x, y, model, residuals, export_values)
@@ -905,6 +922,12 @@ def build_processed_light_curve_export(
 
     output["keep_current_mask"] = keep_current_mask.astype(int)
     output["rejected_current_mask"] = rejected_current_mask.astype(int)
+
+    auto_rejected = np.zeros(n_rows, dtype=int)
+    for index in auto_reject_indices:
+        if 0 <= index < n_rows:
+            auto_rejected[index] = 1
+    output["auto_sigma_rejected"] = auto_rejected
 
     manual_rejected = np.zeros(n_rows, dtype=int)
     manual_restored = np.zeros(n_rows, dtype=int)
@@ -966,6 +989,7 @@ def build_processed_light_curve_export(
         "error_column": yerr_col,
         "model_column": model_col,
         "residual_column": res_col,
+        "auto_sigma_rejected_indices": sorted(auto_reject_indices),
         "manual_rejected_indices": sorted(manual_reject_indices),
         "manual_restored_indices": sorted(manual_keep_indices),
         "export_rejected_points": export_rejected_points,
@@ -1009,6 +1033,126 @@ def save_processed_light_curve_file(path: str, table: pd.DataFrame, metadata: Di
             table.to_csv(f, index=False, sep="\t")
     else:
         table.to_csv(path, index=False)
+
+
+def _safe_export_token(text: object, default: str = "time") -> str:
+    """Return a compact filename/header token safe for simple exports."""
+    token = str(text or "").strip() or default
+    token = token.replace("/", "_").replace("\\", "_").replace(" ", "_")
+    token = "".join(ch for ch in token if ch.isalnum() or ch in {"_", "-", "."})
+    return token or default
+
+
+def build_simple_exoclock_hops_export(
+    processed_table: pd.DataFrame,
+    metadata: Dict[str, object],
+) -> Tuple[pd.DataFrame, Dict[str, object]]:
+    """Build a compact three-column light curve for ExoClock/HOPS-style use.
+
+    The full processed export remains the authoritative, traceable product.  This
+    companion table is intentionally minimal: time, relative flux and flux error.
+    It is labelled ``JD_UTC`` only when ExoPhotoCurve can identify the original
+    observing time as JD_UTC.  Otherwise a simple file can still be written, but
+    it is explicitly marked as not ExoClock-ready to avoid silently mixing time
+    systems such as BJD_TDB and JD_UTC.
+    """
+    if processed_table is None or processed_table.empty:
+        raise ValueError("There are no exported points available for the simple light-curve file.")
+    if "flux" not in processed_table.columns:
+        raise ValueError("No flux column is available in the processed export.")
+    if "flux_error" not in processed_table.columns:
+        raise ValueError("No flux_error column is available in the processed export.")
+
+    time_system = str(metadata.get("time_system", "")).strip() or "unknown"
+    time_system_upper = time_system.upper()
+    jd_written = bool(metadata.get("JD_UTC_column_written", False))
+
+    exoclock_ready = False
+    time_source_column = ""
+    output_time_column = ""
+    if jd_written and "JD_UTC" in processed_table.columns:
+        time_source_column = "JD_UTC"
+        output_time_column = "JD_UTC"
+        exoclock_ready = True
+    elif "time_input" in processed_table.columns:
+        time_source_column = "time_input"
+        output_time_column = _safe_export_token(time_system_upper, "time")
+    elif "time" in processed_table.columns:
+        time_source_column = "time"
+        output_time_column = _safe_export_token(time_system_upper, "time")
+    else:
+        raise ValueError("No usable time column is available in the processed export.")
+
+    time_values = pd.to_numeric(processed_table[time_source_column], errors="coerce").to_numpy(dtype=float)
+    flux_values = pd.to_numeric(processed_table["flux"], errors="coerce").to_numpy(dtype=float)
+    err_values = pd.to_numeric(processed_table["flux_error"], errors="coerce").to_numpy(dtype=float)
+
+    valid = np.isfinite(time_values) & np.isfinite(flux_values) & np.isfinite(err_values) & (err_values > 0)
+    if "exported_row_mask" in processed_table.columns:
+        # If the full export was requested with rejected points included, the
+        # simple external-use file still remains clean by default.
+        exported_mask = pd.to_numeric(processed_table["exported_row_mask"], errors="coerce").to_numpy(dtype=float)
+        valid &= exported_mask > 0.5
+
+    if np.count_nonzero(valid) == 0:
+        raise ValueError("No finite points with positive flux_error are available for the simple light-curve file.")
+
+    simple_table = pd.DataFrame(
+        {
+            output_time_column: time_values[valid],
+            "flux": flux_values[valid],
+            "flux_error": err_values[valid],
+        }
+    )
+
+    simple_metadata = {
+        "created_utc": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+        "source_product": "ExoPhotoCurve processed light curve export",
+        "target": str(metadata.get("planet", "")),
+        "filter": str(metadata.get("filter", "")),
+        "time_system": time_system,
+        "time_source_column": time_source_column,
+        "time_output_column": output_time_column,
+        "flux_source_column": str(metadata.get("flux_column", "flux")),
+        "error_source_column": str(metadata.get("error_column", "flux_error")),
+        "exoclock_hops_ready": bool(exoclock_ready),
+        "warning": "" if exoclock_ready else (
+            "Time was not identified as JD_UTC. The file is a simple flux table, "
+            "but it is not labelled as ExoClock JD_UTC-ready."
+        ),
+        "rejected_points_excluded": True,
+        "finite_positive_error_filter_applied": True,
+        "n_rows_processed_export": int(len(processed_table)),
+        "n_rows_simple_export": int(len(simple_table)),
+        "n_rows_removed_for_simple_export": int(len(processed_table) - len(simple_table)),
+    }
+    return simple_table, simple_metadata
+
+
+def simple_exoclock_hops_export_path(processed_path: str, simple_metadata: Dict[str, object]) -> str:
+    """Return the companion path for the compact external-use light curve."""
+    path = Path(processed_path)
+    if bool(simple_metadata.get("exoclock_hops_ready", False)):
+        suffix = "_ExoClock_HOPS.txt"
+    else:
+        time_token = _safe_export_token(simple_metadata.get("time_output_column", "time"), "time")
+        suffix = f"_simple_{time_token}_flux.txt"
+    return str(path.with_name(path.stem + suffix))
+
+
+def save_simple_exoclock_hops_curve_file(path: str, table: pd.DataFrame, metadata: Dict[str, object]) -> None:
+    """Save the compact external-use light curve as a commented TSV file."""
+    with open(path, "w", encoding="utf-8") as f:
+        f.write("# ExoPhotoCurve simple light curve export\n")
+        f.write("# Intended use: quick import into ExoClock/HOPS-style workflows when time is JD_UTC.\n")
+        for key, value in metadata.items():
+            f.write(f"# {key}: {value}\n")
+        f.write("#\n")
+        # ExoClock-style uploads are safest when every non-numeric line is a
+        # comment.  Therefore the column-name line is written explicitly with
+        # a leading # and pandas writes only numeric data rows below it.
+        f.write("# " + "\t".join(str(col) for col in table.columns) + "\n")
+        table.to_csv(f, index=False, header=False, sep="\t", float_format="%.10f")
 
 
 def _yes_no(value: object) -> str:
@@ -1078,6 +1222,7 @@ def build_reproducibility_recipe(
     detrend_active_regressors: set[str],
     last_detrend_result: Optional[PhotometricDetrendResult],
     last_detrend_input_selection: Optional[Dict[str, str]],
+    auto_reject_indices: set[int],
     manual_reject_indices: set[int],
     manual_keep_indices: set[int],
     last_transit_result,
@@ -1125,12 +1270,12 @@ def build_reproducibility_recipe(
     lines.append(f"Manual/current active comparison stars: {_compact_list(sorted(comp_active_stars))}")
     if last_comp_result is not None:
         lines.append(f"Automatic optimizer was run: yes")
-        lines.append(f"Optimiser initial comparison stars: {_compact_list(last_comp_result.initial_comparisons)}")
-        lines.append(f"Optimiser rejected comparison stars: {_compact_list(last_comp_result.rejected_comparisons)}")
-        lines.append(f"Optimiser removed sequence: {_compact_list(last_comp_result.removed_sequence)}")
-        lines.append(f"Optimiser selected comparison stars: {_compact_list(last_comp_result.selected_comparisons)}")
+        lines.append(f"Optimizer initial comparison stars: {_compact_list(last_comp_result.initial_comparisons)}")
+        lines.append(f"Optimizer rejected comparison stars: {_compact_list(last_comp_result.rejected_comparisons)}")
+        lines.append(f"Optimizer removed sequence: {_compact_list(last_comp_result.removed_sequence)}")
+        lines.append(f"Optimizer selected comparison stars: {_compact_list(last_comp_result.selected_comparisons)}")
         lines.append(f"All-comparison metric: {_metric_summary(last_comp_result.all_comparisons_metric)}")
-        lines.append(f"Optimised metric: {_metric_summary(last_comp_result.optimised_metric)}")
+        lines.append(f"Optimized metric: {_metric_summary(last_comp_result.optimised_metric)}")
         if last_comp_result.improvement_vs_current_percent is not None:
             lines.append(f"Improvement vs current input: {last_comp_result.improvement_vs_current_percent:+.2f} %")
         lines.append(f"Improvement vs all accepted comparisons: {last_comp_result.improvement_vs_all_percent:+.2f} %")
@@ -1139,12 +1284,13 @@ def build_reproducibility_recipe(
     lines.append("")
 
     lines.append("Cleaning and manual point editing")
-    lines.append(f"Sigma clipping enabled: {_yes_no(values.get('-CLEAN_ACTIVE-', False))}")
-    lines.append(f"Sigma clipping target: {values.get('-CLEAN_TARGET-', '')}")
+    lines.append(f"Auto sigma clipping applied: {_yes_no(bool(auto_reject_indices))}")
+    lines.append(f"Auto sigma clipping target: {values.get('-CLEAN_TARGET-', '')}")
     lines.append(f"Sigma threshold: {values.get('-CLEAN_SIGMA-', '')}")
-    lines.append(f"Sigma max iterations: {values.get('-CLEAN_MAXITER-', '')}")
+    lines.append(f"Sigma max iterations per Apply: {values.get('-CLEAN_MAXITER-', '')}")
     lines.append(f"Sigma center: {values.get('-CLEAN_CENTRE-', '')}")
     lines.append(f"Sigma scale: {values.get('-CLEAN_SCALE-', '')}")
+    lines.append(f"Auto sigma-clipped point indices: {_compact_list(sorted(auto_reject_indices))}")
     lines.append(f"Manual rejects enabled: {_yes_no(values.get('-MANUAL_CLEAN_ACTIVE-', True))}")
     lines.append(f"Manual rejected point indices: {_compact_list(sorted(manual_reject_indices))}")
     lines.append(f"Manual restored/kept point indices: {_compact_list(sorted(manual_keep_indices))}")
@@ -1186,6 +1332,31 @@ def build_reproducibility_recipe(
         lines.append(f"RMS after detrending: {last_detrend_result.rms_after_ppt:.3f} ppt")
         lines.append(f"Detrending improvement: {last_detrend_result.improvement_percent:+.2f} %")
         lines.append(f"Transit fit model used by detrending: {_yes_no(getattr(last_detrend_result, 'transit_model_used', False))}")
+        if getattr(last_detrend_result, 'transit_model_used', False):
+            lines.append(f"Model-aware detrending mode: {getattr(last_detrend_result, 'model_aware_mode', 'Single pass')}")
+            lines.append(f"Model-aware iterations: {getattr(last_detrend_result, 'model_aware_iterations', 1)}")
+            lines.append(f"Model-aware converged: {_yes_no(getattr(last_detrend_result, 'model_aware_converged', False))}")
+            lines.append(f"Model-aware stop reason: {getattr(last_detrend_result, 'model_aware_stop_reason', '')}")
+            try:
+                tol_pct = float(getattr(last_detrend_result, 'model_aware_tolerance_percent', float('nan')))
+                if np.isfinite(tol_pct):
+                    lines.append(f"Model-aware tolerance: {tol_pct:.3f} %")
+            except Exception:
+                pass
+            history = getattr(last_detrend_result, 'model_aware_history', []) or []
+            if history:
+                lines.append("Model-aware iteration history:")
+                for row in history:
+                    try:
+                        lines.append(
+                            f"  iter {int(row.get('iteration', 0))}: "
+                            f"dTmid={float(row.get('tmid_delta_min', np.nan)):.4f} min, "
+                            f"dRp/Rs={float(row.get('rp_rs_delta_pct', np.nan)):.4f} %, "
+                            f"dRMS={float(row.get('rms_delta_pct', np.nan)):.4f} %, "
+                            f"dBaseline={float(row.get('baseline_delta_ppt', np.nan)):.4f} ppt"
+                        )
+                    except Exception:
+                        pass
         if getattr(last_detrend_result, 'meridian_flip_enabled', False):
             lines.append(f"Meridian flip full time used: {last_detrend_result.meridian_flip_time:.8f}")
             lines.append(f"Meridian flip model used: {last_detrend_result.meridian_flip_mode}")
@@ -1365,6 +1536,35 @@ def update_manual_point_controls(window: sg.Window, reject_indices: set[int], ke
         window["-MANUAL_KEEP_COUNT-"].update(f"keep {len(keep_indices)}")
     except Exception:
         pass
+
+
+def update_auto_clip_controls(window: sg.Window, reject_indices: set[int]) -> None:
+    """Synchronise the persistent automatic sigma-clipping GUI fields."""
+    try:
+        window["-AUTO_REJECT_INDICES-"].update(_format_index_set(reject_indices))
+        window["-AUTO_REJECT_COUNT-"].update(f"auto {len(reject_indices)}")
+        # The old dynamic checkbox is intentionally kept disabled in the new
+        # workflow. The actual auto mask is stored in -AUTO_REJECT_INDICES-.
+        if "-CLEAN_ACTIVE-" in window.AllKeysDict:
+            window["-CLEAN_ACTIVE-"].update(value=False)
+    except Exception:
+        pass
+
+
+def _with_current_masks(
+    values: Dict[str, object],
+    auto_reject_indices: set[int],
+    manual_reject_indices: set[int],
+    manual_keep_indices: set[int],
+) -> Dict[str, object]:
+    """Return a values copy with the in-memory point masks injected."""
+    output = dict(values)
+    output["-AUTO_REJECT_INDICES-"] = _format_index_set(auto_reject_indices)
+    output["-MANUAL_REJECT_INDICES-"] = _format_index_set(manual_reject_indices)
+    output["-MANUAL_KEEP_INDICES-"] = _format_index_set(manual_keep_indices)
+    # Prevent legacy dynamic sigma clipping from changing points on each redraw/refit.
+    output["-CLEAN_ACTIVE-"] = False
+    return output
 
 
 def connect_plot_click(figure_canvas_agg: Optional[FigureCanvasTkAgg], window: sg.Window) -> None:
@@ -1626,7 +1826,7 @@ def update_comparison_tab(window: sg.Window, detection: Optional[AijFluxDetectio
         target_value = detection.target_ids[0] if detection.target_ids else ""
         window["-COMP_STATUS-"].update(
             f"Raw fluxes detected: {len(detection.target_ids)} target-like star(s), "
-            f"{len(detection.comparison_ids)} comparison star(s). Optimiser active.",
+            f"{len(detection.comparison_ids)} comparison star(s). Optimizer active.",
             text_color="darkgreen",
         )
         window["-COMP_TARGET-"].update(values=detection.target_ids, value=target_value, disabled=False)
@@ -1891,6 +2091,9 @@ def update_detrending_tab(
         "-DET_FLIP_MODE-",
         "-DET_SHOW_FLIP_MARKER-",
         "-DET_USE_TRANSIT_MODEL-",
+        "-DET_MODEL_ITER_MODE-",
+        "-DET_MODEL_MAX_ITER-",
+        "-DET_MODEL_TOL_PCT-",
         "-DET_SEND_TO_DATA-",
         "-DET_SHOW_POPUP-",
         "Run detrending",
@@ -1930,6 +2133,14 @@ def update_detrending_tab(
                 window["-DET_USE_TRANSIT_MODEL-"].update(value=False, disabled=True)
             except Exception:
                 pass
+        try:
+            update_model_aware_detrending_controls(
+                window,
+                bool(transit_fit_available),
+                bool(window["-DET_USE_TRANSIT_MODEL-"].get()) if bool(transit_fit_available) else False,
+            )
+        except Exception:
+            pass
         window["-DET_REPORT-"].update(
             "Ready. No detrending regressor is active by default. "
             "Select columns manually, or press Suggested to use the automatically recommended regressors."
@@ -1938,15 +2149,173 @@ def update_detrending_tab(
         pass
 
 
+def update_model_aware_detrending_controls(
+    window: sg.Window,
+    available: bool,
+    active: Optional[bool] = None,
+) -> None:
+    """Enable/disable model-aware iteration controls consistently."""
+    if active is None:
+        try:
+            active = bool(window["-DET_USE_TRANSIT_MODEL-"].get())
+        except Exception:
+            active = False
+    disabled = not (bool(available) and bool(active))
+    for key in ("-DET_MODEL_ITER_MODE-", "-DET_MODEL_MAX_ITER-", "-DET_MODEL_TOL_PCT-"):
+        try:
+            window[key].update(disabled=disabled)
+        except Exception:
+            pass
+
+
 def update_detrend_fit_model_control(window: sg.Window, detection: Optional[DetrendRegressorDetection], last_transit_result) -> None:
     """Enable model-aware detrending only after a valid transit fit exists."""
     available = bool(detection is not None and detection.compatible and last_transit_result is not None)
+    active = False
     try:
+        active = bool(window["-DET_USE_TRANSIT_MODEL-"].get())
         window["-DET_USE_TRANSIT_MODEL-"].update(disabled=not available)
         if not available:
             window["-DET_USE_TRANSIT_MODEL-"].update(value=False)
+            active = False
     except Exception:
         pass
+    update_model_aware_detrending_controls(window, available, active)
+
+
+def _relative_delta_percent(new_value: float, old_value: float) -> float:
+    """Return |new-old|/|old| in percent, guarding against zero values."""
+    try:
+        new_f = float(new_value)
+        old_f = float(old_value)
+    except Exception:
+        return float("nan")
+    if not np.isfinite(new_f) or not np.isfinite(old_f):
+        return float("nan")
+    denom = max(abs(old_f), 1.0e-12)
+    return 100.0 * abs(new_f - old_f) / denom
+
+
+def _baseline_delta_ppt(new_baseline: Optional[np.ndarray], old_baseline: Optional[np.ndarray]) -> float:
+    """Return the median multiplicative baseline change in ppt."""
+    if new_baseline is None or old_baseline is None:
+        return float("nan")
+    new_arr = np.asarray(new_baseline, dtype=float)
+    old_arr = np.asarray(old_baseline, dtype=float)
+    if new_arr.shape != old_arr.shape:
+        return float("nan")
+    good = np.isfinite(new_arr) & np.isfinite(old_arr) & (np.abs(old_arr) > 1.0e-12)
+    if np.count_nonzero(good) < 3:
+        return float("nan")
+    ratio = new_arr[good] / old_arr[good]
+    return float(1000.0 * np.nanmedian(np.abs(ratio - 1.0)))
+
+
+def _model_aware_convergence_row(
+    iteration: int,
+    previous_transit,
+    current_transit,
+    previous_detrend: Optional[PhotometricDetrendResult],
+    current_detrend: PhotometricDetrendResult,
+) -> Dict[str, object]:
+    """Build one convergence-history row for model-aware detrending."""
+    tmid_delta_min = float("nan")
+    rp_rs_delta_pct = float("nan")
+    rms_delta_pct = float("nan")
+    depth_delta_pct = float("nan")
+    if previous_transit is not None and current_transit is not None:
+        try:
+            tmid_delta_min = abs(float(current_transit.tmid_observed) - float(previous_transit.tmid_observed)) * 24.0 * 60.0
+        except Exception:
+            tmid_delta_min = float("nan")
+        rp_rs_delta_pct = _relative_delta_percent(
+            getattr(current_transit, "observed_rp_rs", float("nan")),
+            getattr(previous_transit, "observed_rp_rs", float("nan")),
+        )
+        rms_delta_pct = _relative_delta_percent(
+            getattr(current_transit, "residual_rms_ppt", float("nan")),
+            getattr(previous_transit, "residual_rms_ppt", float("nan")),
+        )
+        depth_delta_pct = _relative_delta_percent(
+            getattr(current_transit, "observed_depth_ppt", float("nan")),
+            getattr(previous_transit, "observed_depth_ppt", float("nan")),
+        )
+    return {
+        "iteration": int(iteration),
+        "tmid_delta_min": tmid_delta_min,
+        "rp_rs_delta_pct": rp_rs_delta_pct,
+        "depth_delta_pct": depth_delta_pct,
+        "rms_delta_pct": rms_delta_pct,
+        "baseline_delta_ppt": _baseline_delta_ppt(
+            getattr(current_detrend, "baseline", None),
+            getattr(previous_detrend, "baseline", None),
+        ),
+        "tmid_observed": float(getattr(current_transit, "tmid_observed", float("nan"))) if current_transit is not None else float("nan"),
+        "rp_rs": float(getattr(current_transit, "observed_rp_rs", float("nan"))) if current_transit is not None else float("nan"),
+        "rms_ppt": float(getattr(current_transit, "residual_rms_ppt", float("nan"))) if current_transit is not None else float("nan"),
+    }
+
+
+def _model_aware_has_converged(row: Dict[str, object], tol_pct: float, tmid_tol_min: float, baseline_tol_ppt: float) -> bool:
+    """Return True when all model-aware convergence criteria are satisfied."""
+    required = [
+        float(row.get("tmid_delta_min", float("nan"))) <= float(tmid_tol_min),
+        float(row.get("rp_rs_delta_pct", float("nan"))) <= float(tol_pct),
+        float(row.get("rms_delta_pct", float("nan"))) <= float(tol_pct),
+    ]
+    baseline_delta = float(row.get("baseline_delta_ppt", float("nan")))
+    if np.isfinite(baseline_delta):
+        required.append(baseline_delta <= float(baseline_tol_ppt))
+    return all(required)
+
+
+def _format_model_aware_iteration_report(
+    mode: str,
+    history: Sequence[Dict[str, object]],
+    converged: bool,
+    reason: str,
+    tol_pct: float,
+    tmid_tol_min: float,
+    baseline_tol_ppt: float,
+) -> str:
+    """Return a transparent report for model-aware detrending/refit iterations."""
+    lines = [
+        "Model-aware detrending convergence",
+        f"Mode: {mode}",
+        f"Converged: {'yes' if converged else 'no'}",
+        f"Stop reason: {reason}",
+        "Objective criteria for convergence:",
+        f"  |ΔTmid| <= {tmid_tol_min:.3f} min",
+        f"  |ΔRp/Rs| <= {tol_pct:.3f} %",
+        f"  |ΔRMS| <= {tol_pct:.3f} %",
+        f"  median |Δbaseline/baseline| <= {baseline_tol_ppt:.3f} ppt, when measurable",
+        "",
+        "Iteration history:",
+        "iter  ΔTmid[min]  ΔRp/Rs[%]  ΔDepth[%]  ΔRMS[%]  Δbaseline[ppt]  Tmid[BJD_TDB]  Rp/Rs  RMS[ppt]",
+    ]
+    if not history:
+        lines.append("none")
+    for row in history:
+        def fmt(value, width=10, precision=4):
+            try:
+                val = float(value)
+            except Exception:
+                return "n/a".rjust(width)
+            if not np.isfinite(val):
+                return "n/a".rjust(width)
+            return f"{val:{width}.{precision}f}"
+        lines.append(
+            f"{int(row.get('iteration', 0)):>4d}"
+            f"  {fmt(row.get('tmid_delta_min'), 10, 4)}"
+            f"  {fmt(row.get('rp_rs_delta_pct'), 10, 4)}"
+            f"  {fmt(row.get('depth_delta_pct'), 10, 4)}"
+            f"  {fmt(row.get('rms_delta_pct'), 8, 4)}"
+            f"  {fmt(row.get('baseline_delta_ppt'), 14, 4)}"
+            f"  {fmt(row.get('tmid_observed'), 13, 8)}"
+            f"  {fmt(row.get('rp_rs'), 7, 5)}"
+            f"  {fmt(row.get('rms_ppt'), 8, 3)}"
+        )
+    return "\n".join(lines)
 
 
 def add_detrending_columns(
@@ -2059,22 +2428,13 @@ def add_transit_diagnostic_columns(
     return pd.concat([base, diagnostic_columns], axis=1).copy()
 
 
-
-
 def main() -> None:
     """Run the GUI."""
     sg.theme("SystemDefault")
-
+    
     # Handling the extreme scaling (>150%) on Windows systems
     if os.name == "nt":
-        
-        # Keep DPI awareness on Windows for crisp rendering
-        try:
-            ctypes.windll.shcore.SetProcessDpiAwareness(2)
-            ctypes.windll.user32.SetProcessDPIAware()
-        except Exception:
-            pass
-
+            
         # OS-reported scale used only as initial HINT
         try:
             dpi_scale = ctypes.windll.shcore.GetScaleFactorForDevice(0) / 100.0
@@ -2100,11 +2460,11 @@ def main() -> None:
                 finalize=True,
                 icon=icon_path,
                 scaling =scale_win,
-            )   
-
+            )       
+        
         #Mouse over button on Windows
         misc.enable_hover_effect(window)
-
+        
     else:
         window = sg.Window(
             "ExoPhotoCurve - Exoplanet transit lightcurve diagnostics and analysis - Daniele Gasparri",
@@ -2113,6 +2473,7 @@ def main() -> None:
             finalize=True,
             icon=icon_path,
         )
+        
     center_window(window)
     df: Optional[pd.DataFrame] = None
     original_df: Optional[pd.DataFrame] = None
@@ -2137,6 +2498,7 @@ def main() -> None:
     last_detrend_input_selection: Optional[Dict[str, str]] = None
     last_recipe_report: Optional[str] = None
     comp_active_stars: set[str] = set()
+    auto_reject_indices: set[int] = set()
     manual_reject_indices: set[int] = set()
     manual_keep_indices: set[int] = set()
 
@@ -2153,6 +2515,15 @@ def main() -> None:
     update_detrending_tab(window, None)
     update_detrend_fit_model_control(window, None, None)
     update_manual_point_controls(window, manual_reject_indices, manual_keep_indices)
+    update_auto_clip_controls(window, auto_reject_indices)
+
+    # Keep DPI awareness on Windows for crisp rendering
+    if os.name == "nt":
+        try:
+            ctypes.windll.shcore.SetProcessDpiAwareness(2)
+            ctypes.windll.user32.SetProcessDPIAware()
+        except Exception:
+            pass
         
     while True:
         event, values = window.read()
@@ -2164,7 +2535,7 @@ def main() -> None:
         if event == 'User manual':
             open_manual()
 
-        if event == "Load table":
+        if event == "Load":
             file_path = str(values["-FILE-"]).strip()
 
             if not file_path or not os.path.exists(file_path):
@@ -2194,8 +2565,10 @@ def main() -> None:
                 last_detrend_result = None
                 last_detrend_input_selection = None
                 last_recipe_report = None
+                auto_reject_indices.clear()
                 manual_reject_indices.clear()
                 manual_keep_indices.clear()
+                update_auto_clip_controls(window, auto_reject_indices)
                 update_manual_point_controls(window, manual_reject_indices, manual_keep_indices)
                 window["-TR_SET_MODEL_COLUMNS-"].update(value=True)
 
@@ -2238,7 +2611,17 @@ def main() -> None:
             except Exception as exc:
                 sg.popup_error(f"Could not read file:\n{exc}")
 
-        if event == "Build light curve":
+        if event == "Reduce img":
+            reduction_result = run_image_reduction_tool(window)
+            if reduction_result:
+                try:
+                    window["-STATUS-"].update(
+                        f"Reduced sequence ready for Build light curve: {reduction_result.aligned_folder}"
+                    )
+                except Exception:
+                    pass
+
+        if event == "Build LC":
             generated_path = run_aperture_photometry_tool(window)
             if generated_path:
                 try:
@@ -2263,8 +2646,10 @@ def main() -> None:
                     last_detrend_result = None
                     last_detrend_input_selection = None
                     last_recipe_report = None
+                    auto_reject_indices.clear()
                     manual_reject_indices.clear()
                     manual_keep_indices.clear()
+                    update_auto_clip_controls(window, auto_reject_indices)
                     update_manual_point_controls(window, manual_reject_indices, manual_keep_indices)
                     window["-TR_SET_MODEL_COLUMNS-"].update(value=True)
 
@@ -2421,8 +2806,10 @@ def main() -> None:
                     window["-DET_SHOW_FLIP_MARKER-"].update(value=True)
                 except Exception:
                     pass
+                auto_reject_indices.clear()
                 manual_reject_indices.clear()
                 manual_keep_indices.clear()
+                update_auto_clip_controls(window, auto_reject_indices)
                 update_manual_point_controls(window, manual_reject_indices, manual_keep_indices)
 
                 reset_values = dict(values)
@@ -2434,6 +2821,7 @@ def main() -> None:
                 reset_values["-DET_FLIP_FRAC-"] = ""
                 reset_values["-DET_FLIP_MODE-"] = "Robust level matching"
                 reset_values["-DET_SHOW_FLIP_MARKER-"] = True
+                reset_values["-AUTO_REJECT_INDICES-"] = ""
                 reset_values["-MANUAL_REJECT_INDICES-"] = ""
                 reset_values["-MANUAL_KEEP_INDICES-"] = ""
 
@@ -2480,11 +2868,78 @@ def main() -> None:
                 continue
 
             try:
-                current_fig, fig_agg = redraw_plot(window, fig_agg, df, values)
+                plot_values = _with_current_masks(values, auto_reject_indices, manual_reject_indices, manual_keep_indices)
+                current_fig, fig_agg = redraw_plot(window, fig_agg, df, plot_values)
                 window["-STATUS-"].update("Plot updated.")
 
             except Exception as exc:
                 sg.popup_error(f"Could not create plot:\n{exc}")
+
+        if event == "Apply sigma clipping":
+            if df is None:
+                sg.popup_error("Load a table first.")
+                continue
+
+            try:
+                auto_reject_indices = _parse_index_set_text(values.get("-AUTO_REJECT_INDICES-", _format_index_set(auto_reject_indices)))
+                manual_reject_indices = _parse_index_set_text(values.get("-MANUAL_REJECT_INDICES-", _format_index_set(manual_reject_indices)))
+                manual_keep_indices = _parse_index_set_text(values.get("-MANUAL_KEEP_INDICES-", _format_index_set(manual_keep_indices)))
+
+                x_col = str(values.get("-XCOL-", NONE_COL))
+                y_col = str(values.get("-YCOL-", NONE_COL))
+                model_col = str(values.get("-MODEL_COL-", NONE_COL))
+                res_col = str(values.get("-RES_COL-", NONE_COL))
+
+                x = to_numeric_array(df, x_col)
+                y = to_numeric_array(df, y_col)
+                model = to_numeric_array(df, model_col)
+                residuals = to_numeric_array(df, res_col)
+                if x is None or y is None:
+                    raise ValueError("Select X/time and light-curve columns before applying sigma clipping.")
+
+                clip_values = _with_current_masks(values, auto_reject_indices, manual_reject_indices, manual_keep_indices)
+                new_indices, target_label, n_iter = compute_auto_sigma_clip_reject_indices(
+                    x,
+                    y,
+                    model,
+                    residuals,
+                    clip_values,
+                )
+
+                before = len(auto_reject_indices)
+                auto_reject_indices |= new_indices
+                update_auto_clip_controls(window, auto_reject_indices)
+                update_manual_point_controls(window, manual_reject_indices, manual_keep_indices)
+
+                plot_values = _with_current_masks(values, auto_reject_indices, manual_reject_indices, manual_keep_indices)
+                current_fig, fig_agg = redraw_plot(window, fig_agg, df, plot_values)
+
+                added = len(auto_reject_indices) - before
+                if added > 0:
+                    window["-STATUS-"].update(
+                        f"Auto sigma clipping applied on {target_label}: {added} new point(s) locked "
+                        f"({len(auto_reject_indices)} total)."
+                    )
+                else:
+                    window["-STATUS-"].update(
+                        f"Auto sigma clipping applied on {target_label}: no new points rejected "
+                        f"({len(auto_reject_indices)} already locked)."
+                    )
+
+            except Exception as exc:
+                sg.popup_error(f"Could not apply sigma clipping:\n{exc}")
+
+        if event == "Reset auto clipping":
+            auto_reject_indices.clear()
+            update_auto_clip_controls(window, auto_reject_indices)
+            if df is not None:
+                try:
+                    plot_values = _with_current_masks(values, auto_reject_indices, manual_reject_indices, manual_keep_indices)
+                    current_fig, fig_agg = redraw_plot(window, fig_agg, df, plot_values)
+                except Exception as exc:
+                    sg.popup_error(f"Could not reset auto clipping plot:\n{exc}")
+                    continue
+            window["-STATUS-"].update("Auto sigma clipping mask cleared.")
 
         if event == "Compute stats":
             if df is None:
@@ -2492,7 +2947,8 @@ def main() -> None:
                 continue
 
             try:
-                last_stats_report, last_stats_blocks = build_statistics_report(df, values)
+                stats_values = _with_current_masks(values, auto_reject_indices, manual_reject_indices, manual_keep_indices)
+                last_stats_report, last_stats_blocks = build_statistics_report(df, stats_values)
                 window["-STATUS-"].update("Statistics computed.")
 
                 if bool(values.get("-STATS_SHOW_POPUP-", True)):
@@ -2630,6 +3086,17 @@ def main() -> None:
                 sg.popup_error(f"Could not clear photometric detrending:\n{exc}")
 
 
+        if event == "-DET_USE_TRANSIT_MODEL-":
+            try:
+                available = bool(detrend_detection is not None and detrend_detection.compatible and last_transit_result is not None)
+                update_model_aware_detrending_controls(window, available, bool(values.get("-DET_USE_TRANSIT_MODEL-", False)))
+                if bool(values.get("-DET_USE_TRANSIT_MODEL-", False)) and available:
+                    window["-STATUS-"].update(
+                        "Model-aware detrending enabled. Choose Single pass or Iterate to convergence before running detrending."
+                    )
+            except Exception:
+                pass
+
         if event == "Run detrending":
             if df is None:
                 sg.popup_error("Load a table first.")
@@ -2675,10 +3142,22 @@ def main() -> None:
                         planet = find_planet(exoplanet_catalogue, str(values.get("-TR_PLANET-", "")))
                     except Exception:
                         planet = None
+                if planet is None and bool(values.get("-DET_USE_TRANSIT_MODEL-", False)):
+                    if exoplanet_catalogue is None:
+                        catalog_path = str(values.get("-TR_CATALOG-", "")).strip()
+                        exoplanet_catalogue = load_catalogue_into_window(
+                            window,
+                            catalog_path,
+                            current_planet=str(values.get("-TR_PLANET-", "")).strip(),
+                            autodetect_text=Path(current_photometry_file_path).name if current_photometry_file_path else "",
+                            source_label="custom",
+                        )
+                    planet = find_planet(exoplanet_catalogue, str(values.get("-TR_PLANET-", "")))
 
                 external_keep_mask = None
                 if bool(values.get("-DET_USE_CLEANING_MASK-", True)):
-                    cleaning = compute_cleaning_mask(x, y, model, residuals, values)
+                    clean_values = _with_current_masks(values, auto_reject_indices, manual_reject_indices, manual_keep_indices)
+                    cleaning = compute_cleaning_mask(x, y, model, residuals, clean_values)
                     external_keep_mask = cleaning.keep_mask
 
                 polynomial_order = max(1, min(2, parse_int(values.get("-DET_POLY_ORDER-", 1), 1)))
@@ -2696,40 +3175,146 @@ def main() -> None:
                             "Enter a value such as .771 for JD_UTC = 2461203.771."
                         )
 
-                transit_model_for_detrending = None
                 use_fit_model_for_detrending = bool(values.get("-DET_USE_TRANSIT_MODEL-", False))
-                if use_fit_model_for_detrending:
-                    if last_transit_result is None:
-                        raise ValueError(
-                            "Model-aware detrending requires a previous transit fit. "
-                            "Press Run transit model first, then run detrending again."
-                        )
-                    candidate_model = np.asarray(getattr(last_transit_result, "fit_transit_model", []), dtype=float)
-                    if candidate_model.shape != np.asarray(y, dtype=float).shape:
-                        raise ValueError(
-                            "The latest transit model does not match the current light curve length. "
-                            "Run the transit model again before using model-aware detrending."
-                        )
-                    transit_model_for_detrending = candidate_model
+                model_iter_mode = str(values.get("-DET_MODEL_ITER_MODE-", "Single pass"))
+                max_model_iterations = max(1, min(30, parse_int(values.get("-DET_MODEL_MAX_ITER-", 10), 10)))
+                convergence_tol_pct = parse_float(values.get("-DET_MODEL_TOL_PCT-", 0.10), 0.10)
+                if convergence_tol_pct is None or not np.isfinite(convergence_tol_pct) or convergence_tol_pct <= 0:
+                    convergence_tol_pct = 0.10
+                convergence_tol_pct = float(max(0.001, min(10.0, convergence_tol_pct)))
+                tmid_tol_min = 0.02
+                baseline_tol_ppt = max(0.05, 0.5 * convergence_tol_pct)
 
-                last_detrend_result = apply_photometric_detrending(
-                    df,
-                    x,
-                    y,
-                    yerr,
-                    selected_regressors=sorted(detrend_active_regressors),
-                    planet=planet,
-                    mask_expected_transit=bool(values.get("-DET_MASK_TRANSIT-", True)),
-                    external_keep_mask=external_keep_mask,
-                    polynomial_order=polynomial_order,
-                    robust_sigma=float(robust_sigma),
-                    robust_iterations=robust_iterations,
-                    meridian_flip_time=flip_time,
-                    meridian_flip_mode=str(values.get("-DET_FLIP_MODE-", "Robust level matching")),
-                    transit_model=transit_model_for_detrending,
-                )
+                convergence_history: List[Dict[str, object]] = []
+                convergence_report = ""
+                convergence_reason = "standard detrending; model-aware convergence not used"
+                convergence_converged = False
+                n_model_iterations_done = 0
+
+                current_transit_for_model = last_transit_result
+                previous_detrend_result: Optional[PhotometricDetrendResult] = None
+                final_transit_result = None
+
+                if use_fit_model_for_detrending and current_transit_for_model is None:
+                    raise ValueError(
+                        "Model-aware detrending requires a previous transit fit. "
+                        "Press Run transit model first, then run detrending again."
+                    )
+
+                n_requested_iterations = max_model_iterations if (
+                    use_fit_model_for_detrending and model_iter_mode == "Iterate to convergence"
+                ) else 1
+
+                for iteration in range(1, n_requested_iterations + 1):
+                    transit_model_for_detrending = None
+                    if use_fit_model_for_detrending:
+                        candidate_model = np.asarray(getattr(current_transit_for_model, "fit_transit_model", []), dtype=float)
+                        if candidate_model.shape != np.asarray(y, dtype=float).shape:
+                            raise ValueError(
+                                "The latest transit model does not match the current light curve length. "
+                                "Run the transit model again before using model-aware detrending."
+                            )
+                        transit_model_for_detrending = candidate_model
+
+                    candidate_detrend_result = apply_photometric_detrending(
+                        df,
+                        x,
+                        y,
+                        yerr,
+                        selected_regressors=sorted(detrend_active_regressors),
+                        planet=planet,
+                        mask_expected_transit=bool(values.get("-DET_MASK_TRANSIT-", True)),
+                        external_keep_mask=external_keep_mask,
+                        polynomial_order=polynomial_order,
+                        robust_sigma=float(robust_sigma),
+                        robust_iterations=robust_iterations,
+                        meridian_flip_time=flip_time,
+                        meridian_flip_mode=str(values.get("-DET_FLIP_MODE-", "Robust level matching")),
+                        transit_model=transit_model_for_detrending,
+                    )
+
+                    last_detrend_result = candidate_detrend_result
+                    n_model_iterations_done = iteration
+
+                    if not use_fit_model_for_detrending:
+                        break
+
+                    # In model-aware mode the detrended curve must be refitted
+                    # immediately and internally.  This makes the procedure
+                    # reproducible and prevents the result from depending on how
+                    # many times the user manually presses two GUI buttons.
+                    clean_values = _with_current_masks(values, auto_reject_indices, manual_reject_indices, manual_keep_indices)
+                    det_cleaning = compute_cleaning_mask(
+                        candidate_detrend_result.x,
+                        candidate_detrend_result.detrended_flux,
+                        None,
+                        None,
+                        clean_values,
+                    )
+                    candidate_transit_result = run_transit_diagnostics(
+                        candidate_detrend_result.x,
+                        candidate_detrend_result.detrended_flux,
+                        candidate_detrend_result.detrended_flux_err,
+                        planet,
+                        values,
+                        keep_mask=det_cleaning.keep_mask,
+                    )
+                    final_transit_result = candidate_transit_result
+
+                    row = _model_aware_convergence_row(
+                        iteration,
+                        current_transit_for_model,
+                        candidate_transit_result,
+                        previous_detrend_result,
+                        candidate_detrend_result,
+                    )
+                    convergence_history.append(row)
+
+                    if model_iter_mode == "Single pass":
+                        convergence_reason = "single pass selected by user"
+                        convergence_converged = False
+                        current_transit_for_model = candidate_transit_result
+                        previous_detrend_result = candidate_detrend_result
+                        break
+
+                    if _model_aware_has_converged(row, convergence_tol_pct, tmid_tol_min, baseline_tol_ppt):
+                        convergence_reason = f"objective criteria met at iteration {iteration}"
+                        convergence_converged = True
+                        current_transit_for_model = candidate_transit_result
+                        previous_detrend_result = candidate_detrend_result
+                        break
+
+                    current_transit_for_model = candidate_transit_result
+                    previous_detrend_result = candidate_detrend_result
+                    convergence_reason = f"maximum iterations reached ({max_model_iterations})"
+
+                if use_fit_model_for_detrending:
+                    last_transit_result = final_transit_result
+                    last_detrend_result.model_aware_mode = model_iter_mode
+                    last_detrend_result.model_aware_iterations = int(n_model_iterations_done)
+                    last_detrend_result.model_aware_converged = bool(convergence_converged)
+                    last_detrend_result.model_aware_stop_reason = convergence_reason
+                    last_detrend_result.model_aware_tolerance_percent = float(convergence_tol_pct)
+                    last_detrend_result.model_aware_history = convergence_history
+                    convergence_report = _format_model_aware_iteration_report(
+                        model_iter_mode,
+                        convergence_history,
+                        convergence_converged,
+                        convergence_reason,
+                        convergence_tol_pct,
+                        tmid_tol_min,
+                        baseline_tol_ppt,
+                    )
+                else:
+                    last_detrend_result.model_aware_mode = "Off"
+                    last_detrend_result.model_aware_iterations = 0
+                    last_detrend_result.model_aware_converged = False
+                    last_detrend_result.model_aware_stop_reason = convergence_reason
+                    last_detrend_result.model_aware_history = []
+
                 last_detrend_report = (
                     last_detrend_result.report
+                    + (("\n\n" + convergence_report) if convergence_report else "")
                     + "\n\nInput columns used"
                     + f"\nSource: {detrend_source_note}"
                     + f"\nTime column: {x_col}"
@@ -2742,37 +3327,99 @@ def main() -> None:
                 df = add_detrending_columns(df, last_detrend_result)
                 cols = numeric_columns(df)
                 update_combo_values(window, cols)
-                window["-DET_REPORT-"].update(last_detrend_report)
 
                 plot_values = dict(values)
                 if bool(values.get("-DET_SEND_TO_DATA-", True)):
                     plot_values = set_detrending_output_columns(window, values)
                     pre_transit_column_selection = current_column_selection(plot_values)
 
-                window["-STATUS-"].update(
-                    f"Detrending complete: RMS {last_detrend_result.rms_before_ppt:.2f} -> "
-                    f"{last_detrend_result.rms_after_ppt:.2f} ppt "
-                    f"({last_detrend_result.improvement_percent:+.1f}%)."
-                )
+                if use_fit_model_for_detrending and last_transit_result is not None:
+                    last_recipe_report = build_reproducibility_recipe(
+                        df,
+                        values,
+                        current_photometry_file_path,
+                        original_column_selection,
+                        pre_transit_column_selection,
+                        aij_flux_detection,
+                        comp_active_stars,
+                        last_comp_result,
+                        detrend_detection,
+                        detrend_active_regressors,
+                        last_detrend_result,
+                        last_detrend_input_selection,
+                        auto_reject_indices,
+                        manual_reject_indices,
+                        manual_keep_indices,
+                        last_transit_result,
+                    )
+                    last_transit_report = format_transit_report(last_transit_result) + "\n\n" + last_recipe_report
+                    df = add_transit_diagnostic_columns(
+                        df,
+                        last_transit_result,
+                        last_detrend_result.x,
+                        last_detrend_result.detrended_flux,
+                        last_detrend_result.detrended_flux_err,
+                    )
+                    df = apply_transit_display_aliases(
+                        df,
+                        str(values.get("-TR_DISPLAY_MODE-", "Detrended flux")),
+                    )
+                    cols = numeric_columns(df)
+                    update_combo_values(window, cols)
+
+                    show_transit_result = bool(values.get("-TR_SET_MODEL_COLUMNS-", True))
+                    plot_values = set_transit_plot_columns(
+                        window,
+                        values,
+                        str(values.get("-TR_DISPLAY_MODE-", "Detrended flux")),
+                        pre_transit_column_selection or original_column_selection,
+                        show_transit_result,
+                    )
+                    plot_values = _with_current_masks(plot_values, auto_reject_indices, manual_reject_indices, manual_keep_indices)
+
+                    last_detrend_report += (
+                        "\n\nFinal model-aware transit summary"
+                        f"\nObserved Tmid: {last_transit_result.tmid_observed:.8f} BJD_TDB"
+                        f"\nO-C: {last_transit_result.oc_minutes:+.3f} min"
+                        f"\nRp/Rs: {last_transit_result.observed_rp_rs:.5f}"
+                        f"\nDepth: {last_transit_result.observed_depth_ppt:.3f} ppt"
+                        f"\nResidual RMS: {last_transit_result.residual_rms_ppt:.3f} ppt"
+                    )
+
+                window["-DET_REPORT-"].update(last_detrend_report)
+
+                if use_fit_model_for_detrending and last_transit_result is not None:
+                    if model_iter_mode == "Iterate to convergence":
+                        status_prefix = "Model-aware detrending converged" if convergence_converged else "Model-aware detrending stopped"
+                        window["-STATUS-"].update(
+                            f"{status_prefix} after {n_model_iterations_done} iteration(s): "
+                            f"RMS = {last_transit_result.residual_rms_ppt:.3f} ppt. {convergence_reason}."
+                        )
+                    else:
+                        window["-STATUS-"].update(
+                            f"Model-aware single-pass detrending complete and transit refitted: "
+                            f"RMS = {last_transit_result.residual_rms_ppt:.3f} ppt."
+                        )
+                else:
+                    window["-STATUS-"].update(
+                        f"Detrending complete: RMS {last_detrend_result.rms_before_ppt:.2f} -> "
+                        f"{last_detrend_result.rms_after_ppt:.2f} ppt "
+                        f"({last_detrend_result.improvement_percent:+.1f}%)."
+                    )
 
                 if bool(values.get("-DET_SHOW_POPUP-", True)):
                     sg.popup_scrolled(
                         last_detrend_report,
                         title="Photometric detrending",
-                        size=(92, 34),
+                        size=(96, 38),
                     )
 
+                update_detrend_fit_model_control(window, detrend_detection, last_transit_result)
                 current_fig, fig_agg = redraw_plot(window, fig_agg, df, plot_values)
-
-                if use_fit_model_for_detrending:
-                    window["-STATUS-"].update("Detrending complete. Re-running transit model on the detrended curve...")
-                    try:
-                        window.write_event_value("Run transit model", None)
-                    except Exception:
-                        pass
 
             except Exception as exc:
                 sg.popup_error(f"Could not run photometric detrending:\n{exc}")
+
 
         if event in ("-COMP_DIAG_STAR-", "-COMP_PLOT_DIAG-"):
             if df is None or not last_comp_diagnostics:
@@ -2846,6 +3493,45 @@ def main() -> None:
                 )
                 last_comp_report = last_comp_result.report
 
+                downstream_cleared = (
+                    last_detrend_result is not None
+                    or last_transit_result is not None
+                    or bool(auto_reject_indices)
+                    or last_stats_report is not None
+                    or last_recipe_report is not None
+                    or any(
+                        str(column).startswith("PhotoCurve_det_")
+                        or str(column).startswith("PhotoCurve_time_")
+                        or str(column).startswith("PhotoCurve_fit_")
+                        or str(column).startswith("PhotoCurve_expected_")
+                        or str(column).startswith("PhotoCurve_detrended_")
+                        or str(column).startswith("PhotoCurve_baseline")
+                        or str(column).startswith("PhotoCurve_predicted_")
+                        or str(column).startswith("PhotoCurve_calculated_")
+                        or str(column).startswith("PhotoCurve_oc_")
+                        for column in df.columns
+                    )
+                )
+                df = clear_downstream_analysis_columns(df)
+                last_detrend_report = None
+                last_detrend_result = None
+                last_detrend_input_selection = None
+                last_transit_report = None
+                last_transit_result = None
+                last_stats_report = None
+                last_stats_blocks = []
+                last_recipe_report = None
+                auto_reject_indices.clear()
+                update_auto_clip_controls(window, auto_reject_indices)
+                update_detrend_fit_model_control(window, detrend_detection, last_transit_result)
+                try:
+                    window["-DET_REPORT-"].update(
+                        "Comparison stars changed. Previous detrending and transit-fit products were cleared "
+                        "because the light curve changed."
+                    )
+                except Exception:
+                    pass
+
                 diag_x, last_comp_diagnostics = build_current_comparison_diagnostics(
                     df,
                     aij_flux_detection,
@@ -2871,10 +3557,17 @@ def main() -> None:
                     pre_transit_column_selection = current_column_selection(plot_values)
 
                 current_fig, fig_agg = redraw_plot(window, fig_agg, df, plot_values)
-                window["-STATUS-"].update(
+                status_message = (
                     f"Manual comparison subset: {len(last_comp_result.selected_comparisons)} star(s); "
                     f"RMS = {last_comp_result.optimised_metric.rms_ppt:.2f} ppt"
                 )
+                if downstream_cleared:
+                    status_message += (
+                        " | Comparison stars changed: downstream analysis products "
+                        "(detrending, transit fit, statistics and auto sigma clipping) "
+                        "were cleared because the light curve changed."
+                    )
+                window["-STATUS-"].update(status_message)
 
             except Exception as exc:
                 window["-STATUS-"].update(f"Manual comparison update failed: {exc}")
@@ -2884,17 +3577,13 @@ def main() -> None:
             manual_keep_indices.clear()
             update_manual_point_controls(window, manual_reject_indices, manual_keep_indices)
             if df is not None:
-                plot_values = dict(values)
-                plot_values["-MANUAL_REJECT_INDICES-"] = ""
-                plot_values["-MANUAL_KEEP_INDICES-"] = ""
+                plot_values = _with_current_masks(values, auto_reject_indices, manual_reject_indices, manual_keep_indices)
                 current_fig, fig_agg = redraw_plot(window, fig_agg, df, plot_values)
             window["-STATUS-"].update("Manual point mask cleared.")
 
         if event in ("-MANUAL_CLEAN_ACTIVE-",):
             if df is not None:
-                plot_values = dict(values)
-                plot_values["-MANUAL_REJECT_INDICES-"] = _format_index_set(manual_reject_indices)
-                plot_values["-MANUAL_KEEP_INDICES-"] = _format_index_set(manual_keep_indices)
+                plot_values = _with_current_masks(values, auto_reject_indices, manual_reject_indices, manual_keep_indices)
                 current_fig, fig_agg = redraw_plot(window, fig_agg, df, plot_values)
 
         if event == "-PLOT_POINT_CLICK-":
@@ -2915,6 +3604,7 @@ def main() -> None:
                     window["-STATUS-"].update("Click was not close enough to a plotted data point.")
                     continue
 
+                auto_reject_indices = _parse_index_set_text(values.get("-AUTO_REJECT_INDICES-", _format_index_set(auto_reject_indices)))
                 manual_reject_indices = _parse_index_set_text(values.get("-MANUAL_REJECT_INDICES-", ""))
                 manual_keep_indices = _parse_index_set_text(values.get("-MANUAL_KEEP_INDICES-", ""))
 
@@ -2930,9 +3620,7 @@ def main() -> None:
                 residuals = to_numeric_array(df, str(values.get("-RES_COL-", NONE_COL)))
                 if x is None:
                     continue
-                clean_values = dict(values)
-                clean_values["-MANUAL_REJECT_INDICES-"] = _format_index_set(manual_reject_indices)
-                clean_values["-MANUAL_KEEP_INDICES-"] = _format_index_set(manual_keep_indices)
+                clean_values = _with_current_masks(values, auto_reject_indices, manual_reject_indices, manual_keep_indices)
                 cleaning = compute_cleaning_mask(x, y, model, residuals, clean_values)
                 currently_kept = bool(index < len(cleaning.keep_mask) and cleaning.keep_mask[index])
 
@@ -2949,10 +3637,8 @@ def main() -> None:
                 window["-MANUAL_CLEAN_ACTIVE-"].update(value=True)
                 update_manual_point_controls(window, manual_reject_indices, manual_keep_indices)
 
-                plot_values = dict(values)
+                plot_values = _with_current_masks(values, auto_reject_indices, manual_reject_indices, manual_keep_indices)
                 plot_values["-MANUAL_CLEAN_ACTIVE-"] = True
-                plot_values["-MANUAL_REJECT_INDICES-"] = _format_index_set(manual_reject_indices)
-                plot_values["-MANUAL_KEEP_INDICES-"] = _format_index_set(manual_keep_indices)
                 current_fig, fig_agg = redraw_plot(window, fig_agg, df, plot_values)
                 window["-STATUS-"].update(f"Point {index} manually {action}.")
 
@@ -3020,6 +3706,45 @@ def main() -> None:
                 last_comp_report = last_comp_result.report
                 comp_active_stars = set(last_comp_result.selected_comparisons)
 
+                downstream_cleared = (
+                    last_detrend_result is not None
+                    or last_transit_result is not None
+                    or bool(auto_reject_indices)
+                    or last_stats_report is not None
+                    or last_recipe_report is not None
+                    or any(
+                        str(column).startswith("PhotoCurve_det_")
+                        or str(column).startswith("PhotoCurve_time_")
+                        or str(column).startswith("PhotoCurve_fit_")
+                        or str(column).startswith("PhotoCurve_expected_")
+                        or str(column).startswith("PhotoCurve_detrended_")
+                        or str(column).startswith("PhotoCurve_baseline")
+                        or str(column).startswith("PhotoCurve_predicted_")
+                        or str(column).startswith("PhotoCurve_calculated_")
+                        or str(column).startswith("PhotoCurve_oc_")
+                        for column in df.columns
+                    )
+                )
+                df = clear_downstream_analysis_columns(df)
+                last_detrend_report = None
+                last_detrend_result = None
+                last_detrend_input_selection = None
+                last_transit_report = None
+                last_transit_result = None
+                last_stats_report = None
+                last_stats_blocks = []
+                last_recipe_report = None
+                auto_reject_indices.clear()
+                update_auto_clip_controls(window, auto_reject_indices)
+                update_detrend_fit_model_control(window, detrend_detection, last_transit_result)
+                try:
+                    window["-DET_REPORT-"].update(
+                        "Comparison stars changed. Previous detrending and transit-fit products were cleared "
+                        "because the light curve changed."
+                    )
+                except Exception:
+                    pass
+
                 last_comp_diagnostics = build_comparison_diagnostics(
                     df,
                     aij_flux_detection,
@@ -3047,10 +3772,17 @@ def main() -> None:
                     plot_values = set_comparison_output_columns(window, values)
                     pre_transit_column_selection = current_column_selection(plot_values)
 
-                window["-STATUS-"].update(
+                status_message = (
                     f"Comparison optimizer: selected {len(last_comp_result.selected_comparisons)} star(s); "
                     f"RMS = {last_comp_result.optimised_metric.rms_ppt:.2f} ppt"
                 )
+                if downstream_cleared:
+                    status_message += (
+                        " | Comparison stars changed: downstream analysis products "
+                        "(detrending, transit fit, statistics and auto sigma clipping) "
+                        "were cleared because the light curve changed."
+                    )
+                window["-STATUS-"].update(status_message)
 
                 if bool(values.get("-COMP_SHOW_POPUP-", True)):
                     sg.popup_scrolled(
@@ -3134,7 +3866,8 @@ def main() -> None:
                     if stored_flux_err is not None:
                         yerr_for_diagnostics = stored_flux_err
 
-                cleaning = compute_cleaning_mask(x_for_diagnostics, y_for_diagnostics, model, residuals, values)
+                clean_values = _with_current_masks(values, auto_reject_indices, manual_reject_indices, manual_keep_indices)
+                cleaning = compute_cleaning_mask(x_for_diagnostics, y_for_diagnostics, model, residuals, clean_values)
 
                 last_transit_result = run_transit_diagnostics(
                     x_for_diagnostics,
@@ -3157,6 +3890,7 @@ def main() -> None:
                     detrend_active_regressors,
                     last_detrend_result,
                     last_detrend_input_selection,
+                    auto_reject_indices,
                     manual_reject_indices,
                     manual_keep_indices,
                     last_transit_result,
@@ -3189,6 +3923,7 @@ def main() -> None:
                     pre_transit_column_selection or original_column_selection,
                     show_transit_result,
                 )
+                plot_values = _with_current_masks(plot_values, auto_reject_indices, manual_reject_indices, manual_keep_indices)
 
                 window["-STATUS-"].update(
                     f"Transit diagnostics: O-C = {last_transit_result.oc_minutes:+.2f} min, "
@@ -3236,13 +3971,36 @@ def main() -> None:
                         current_photometry_file_path,
                         values.get("-TR_CATALOG-", ""),
                         last_transit_result,
+                        auto_reject_indices,
                         manual_reject_indices,
                         manual_keep_indices,
                     )
                     save_processed_light_curve_file(save_path, curve_table, curve_metadata)
-                    window["-STATUS-"].update(f"Processed light curve saved: {save_path}")
+
+                    saved_paths = [f"Processed light curve: {save_path}"]
+                    simple_warning = ""
+                    if bool(values.get("-EXPORT_SIMPLE_EXOCLOCK-", True)):
+                        try:
+                            simple_table, simple_metadata = build_simple_exoclock_hops_export(curve_table, curve_metadata)
+                            simple_path = simple_exoclock_hops_export_path(save_path, simple_metadata)
+                            save_simple_exoclock_hops_curve_file(simple_path, simple_table, simple_metadata)
+                            if bool(simple_metadata.get("exoclock_hops_ready", False)):
+                                saved_paths.append(f"ExoClock/HOPS simple light curve: {simple_path}")
+                            else:
+                                saved_paths.append(f"Simple light curve (not JD_UTC-labelled): {simple_path}")
+                                simple_warning = str(simple_metadata.get("warning", ""))
+                        except Exception as simple_exc:
+                            simple_warning = f"Simple ExoClock/HOPS export was not created: {simple_exc}"
+
+                    status_text = "Saved " + "; ".join(saved_paths)
+                    if simple_warning:
+                        status_text += f" | {simple_warning}"
+                    window["-STATUS-"].update(status_text[:220])
+                    if simple_warning:
+                        sg.popup_scrolled(status_text, title="Save curve", size=(88, 12))
                 except Exception as exc:
                     sg.popup_error(f"Could not save processed light curve:\n{exc}")
+
 
         if event == "Save stats":
             if df is None:
@@ -3251,7 +4009,8 @@ def main() -> None:
 
             if last_stats_report is None:
                 try:
-                    last_stats_report, last_stats_blocks = build_statistics_report(df, values)
+                    stats_values = _with_current_masks(values, auto_reject_indices, manual_reject_indices, manual_keep_indices)
+                    last_stats_report, last_stats_blocks = build_statistics_report(df, stats_values)
                 except Exception as exc:
                     sg.popup_error(f"Could not compute statistics:\n{exc}")
                     continue
@@ -3295,6 +4054,7 @@ def main() -> None:
                     detrend_active_regressors,
                     last_detrend_result,
                     last_detrend_input_selection,
+                    auto_reject_indices,
                     manual_reject_indices,
                     manual_keep_indices,
                     last_transit_result,
@@ -3406,6 +4166,11 @@ def main() -> None:
                 try:
                     config = load_config(config_path)
                     apply_config(window, config)
+                    auto_reject_indices = _parse_index_set_text(config.get("-AUTO_REJECT_INDICES-", ""))
+                    manual_reject_indices = _parse_index_set_text(config.get("-MANUAL_REJECT_INDICES-", ""))
+                    manual_keep_indices = _parse_index_set_text(config.get("-MANUAL_KEEP_INDICES-", ""))
+                    update_auto_clip_controls(window, auto_reject_indices)
+                    update_manual_point_controls(window, manual_reject_indices, manual_keep_indices)
 
                     file_path = str(config.get("-FILE-", "")).strip()
 
@@ -3424,10 +4189,17 @@ def main() -> None:
                         aij_flux_detection = detect_aij_flux_columns(df)
                         comp_active_stars = set(aij_flux_detection.comparison_ids) if aij_flux_detection.compatible else set()
                         update_comparison_tab(window, aij_flux_detection, comp_active_stars)
+                        auto_reject_indices.clear()
                         manual_reject_indices.clear()
                         manual_keep_indices.clear()
+                        update_auto_clip_controls(window, auto_reject_indices)
                         update_manual_point_controls(window, manual_reject_indices, manual_keep_indices)
                         apply_config(window, config)
+                        auto_reject_indices = _parse_index_set_text(config.get("-AUTO_REJECT_INDICES-", ""))
+                        manual_reject_indices = _parse_index_set_text(config.get("-MANUAL_REJECT_INDICES-", ""))
+                        manual_keep_indices = _parse_index_set_text(config.get("-MANUAL_KEEP_INDICES-", ""))
+                        update_auto_clip_controls(window, auto_reject_indices)
+                        update_manual_point_controls(window, manual_reject_indices, manual_keep_indices)
 
                         window["-NROWS-"].update(str(len(df)))
                         window["-NCOLS-"].update(str(len(df.columns)))

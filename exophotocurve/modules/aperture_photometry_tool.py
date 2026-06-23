@@ -1503,6 +1503,7 @@ def _build_layout() -> List[List[sg.Element]]:
         ],
     ]
 
+
     aperture_frame = [
         [
             sg.Text("Aperture", size=(10, 1), tooltip='Set the aperture sizes here: inner radius, inner sky annulus, outer sky annulus.\nYou can change these values even after you set the apertures on the stars\nYou will see the changes in size in real time in the plot'),
@@ -2197,8 +2198,6 @@ def run_aperture_photometry_tool(parent_window: Optional[sg.Window] = None) -> O
         window.close()
 
     return return_path
-
-
 
 
 def center_window(window, margin=20):

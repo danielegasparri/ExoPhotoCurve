@@ -1,10 +1,12 @@
-PhotoCurve Lab ExoClock transit catalogue
+ExoPhotoCurve ExoClock transit catalogue
 Source: ExoClock planets_json endpoint
 Endpoint: https://www.exoclock.space/database/planets_json
-Generated: 2026-06-10 21:33:29 UTC
+Generated: 2026-06-23 19:18:05 UTC
 Rows: 776
-Rows with a/Rs and inclination for batman: 725
-Supplement catalogue: C:\Users\danie\Desktop\plot transiti finali topcat\dati\photocurve_lab_v04_13_1_model_depth_report_fix\photocurve_lab_project\photocurve_lab\catalogs\exoplanet_transit_catalog.csv
-Supplemented rows: 770
-Depth convention: depth_mmag was converted to relative flux depth in ppt using depth = 1 - 10^(-depth_mmag/2500).
-Important: ExoClock currently supplies ephemerides, duration, depth and coordinates, but not all geometric parameters used by batman. Use a NASA-style supplement catalogue or manually curated rows to obtain physical-model fits for more targets.
+Catalogue type: ExoClock pure
+Rows with a/Rs and inclination for batman: 776
+Supplement catalogue: disabled; ExoClock-pure catalogue
+Supplemented rows: 0
+Depth convention: ExoClock millimagnitude depths, when provided, are converted to relative flux ppt using depth = (1 - 10^(-depth_mmag/2500)) * 1000. Direct ExoClock flux depths are stored in ppt.
+Default behavior: no NASA-style physical geometry is mixed into the ExoClock catalogue. Rows without complete ExoClock geometry should be modelled empirically in ExoPhotoCurve Auto mode.
+Hybrid behavior: if --supplement-catalogue is explicitly provided, missing geometry/stellar parameters are filled from that supplement and affected rows are marked as ExoClock+supplement hybrid.

@@ -45,6 +45,11 @@ CATALOGUE_COLUMNS = [
     "time_reference",
     "source",
     "notes",
+    "catalogue_type",
+    "depth_source",
+    "rprs_source",
+    "geometry_source",
+    "stellar_source",
 ]
 
 REQUIRED_CATALOGUE_COLUMNS = [
@@ -83,6 +88,11 @@ OPTIONAL_CATALOGUE_COLUMNS = [
     "time_reference",
     "source",
     "notes",
+    "catalogue_type",
+    "depth_source",
+    "rprs_source",
+    "geometry_source",
+    "stellar_source",
 ]
 
 
@@ -122,6 +132,11 @@ class PlanetTransitParameters:
     time_reference: str = ""
     source: str = ""
     notes: str = ""
+    catalogue_type: str = ""
+    depth_source: str = ""
+    rprs_source: str = ""
+    geometry_source: str = ""
+    stellar_source: str = ""
 
     @property
     def depth_relative(self) -> float:
@@ -195,7 +210,33 @@ def load_exoplanet_catalogue(path: str | Path) -> pd.DataFrame:
     for col in numeric_columns:
         df[col] = pd.to_numeric(df[col], errors="coerce")
 
-    # Keep the empirical-model depth consistent with Rp/Rs when available.
+    # ``depth_ppt`` is the catalogue flux depth used by the empirical model.
+    # ``model_depth_ppt`` is an optional explicit model-depth override.  Older
+    # ExoClock-derived catalogues sometimes ended up with depth_ppt = Rp/Rs^2
+    # while model_depth_ppt contained the intended flux depth converted from the
+    # ExoClock millimagnitude depth.  For ExoClock-pure rows, keep the two
+    # quantities consistent with the flux/model depth so that the report does
+    # not show a misleading "Catalogue depth = Rp/Rs^2" value.
+    missing_model_depth = ~np.isfinite(df["model_depth_ppt"]) | (df["model_depth_ppt"] <= 0)
+    df.loc[missing_model_depth, "model_depth_ppt"] = df.loc[missing_model_depth, "depth_ppt"]
+
+    is_exoclock_pure = (
+        df["catalogue_type"].astype(str).str.contains("ExoClock pure", case=False, na=False)
+        | df["source"].astype(str).str.contains("ExoClock", case=False, na=False)
+    )
+    has_model_flux_depth = np.isfinite(df["model_depth_ppt"]) & (df["model_depth_ppt"] > 0)
+    has_depth = np.isfinite(df["depth_ppt"]) & (df["depth_ppt"] > 0)
+    differs_substantially = (
+        has_model_flux_depth
+        & has_depth
+        & (np.abs(df["model_depth_ppt"] - df["depth_ppt"]) > np.maximum(0.25, 0.03 * df["depth_ppt"]))
+    )
+    df.loc[is_exoclock_pure & differs_substantially, "depth_ppt"] = df.loc[
+        is_exoclock_pure & differs_substantially, "model_depth_ppt"
+    ]
+
+    # For legacy non-ExoClock catalogues without a model-depth column, keep a
+    # fallback based on Rp/Rs only when no flux depth/model depth exists.
     missing_model_depth = ~np.isfinite(df["model_depth_ppt"]) | (df["model_depth_ppt"] <= 0)
     has_rprs = np.isfinite(df["rp_rs"]) & (df["rp_rs"] > 0)
     df.loc[missing_model_depth & has_rprs, "model_depth_ppt"] = (df.loc[missing_model_depth & has_rprs, "rp_rs"] ** 2) * 1000.0
@@ -429,6 +470,11 @@ def find_planet(catalogue: pd.DataFrame, name: str) -> PlanetTransitParameters:
                 time_reference=str(row.get("time_reference", "")),
                 source=str(row.get("source", "")),
                 notes=str(row.get("notes", "")),
+                catalogue_type=str(row.get("catalogue_type", "")),
+                depth_source=str(row.get("depth_source", "")),
+                rprs_source=str(row.get("rprs_source", "")),
+                geometry_source=str(row.get("geometry_source", "")),
+                stellar_source=str(row.get("stellar_source", "")),
             )
 
     raise ValueError(f"Planet not found in catalogue: {name}")

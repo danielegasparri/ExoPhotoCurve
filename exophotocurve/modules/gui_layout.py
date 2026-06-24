@@ -41,7 +41,7 @@ def make_layout() -> List[List[sg.Element]]:
     file_frame = [
         [
             sg.Button("Reduce img", button_color=('black', 'light green'), tooltip='Calibrate and align a raw FITS sequence scientifically: bias/dark/flat/dark-flat correction, Bayer channel extraction, and meridian-flip-safe registration'),
-            sg.Button("Build LC", button_color= ('black','light blue'),tooltip='Construct your lightcurve here starting from a calibrated and aligned image sequence in fit format'),
+            sg.Button("Build LC", button_color= ('black','light blue'),tooltip='Construct your light curve here starting from a calibrated and aligned image sequence in fit format'),
             sg.Text("Load LC", tooltip='If you already have a light curve file, browse it here, click Load\nand proceed to visualization and analysis\n You can directly upload an AstroImageJ table or any table containing\nthe data and names of the columns, WITHOUT the # character'),
             sg.Input(key="-FILE-", size=(25, 1)),
             sg.FileBrowse(
@@ -50,7 +50,7 @@ def make_layout() -> List[List[sg.Element]]:
                     ("Text files", "*.txt *.dat *.csv *.tsv"),
                     ("All files", "*.*"),
                 ), tooltip='Browse your light curve table here'),
-            sg.Button("Load", tooltip='Load your lightcurve text file that you have just browsed'),
+            sg.Button("Load", tooltip='Load your light curve text file that you have just browsed'),
         ],
         [
             sg.Text("Delimiter", size=(13, 1)),
@@ -83,10 +83,10 @@ def make_layout() -> List[List[sg.Element]]:
         
         [
             sg.Checkbox(
-                "Export rejected points",
+                "Include rejected points in full export",
                 default=False,
                 key="-EXPORT_REJECTED_POINTS-",
-                tooltip="If disabled, Save curve writes only the points currently kept by manual/sigma cleaning and the latest transit-fit mask.",
+                tooltip="If enabled, the full ExoPhotoCurve export keeps all rows and writes mask columns documenting rejected points.\nThe simple ExoClock/HOPS file still excludes rejected points.",
             ),
         ],
         [
@@ -101,7 +101,7 @@ def make_layout() -> List[List[sg.Element]]:
         [
             sg.Text(
                 "After loading a table, ExoPhotoCurve tries to select the right columns automatically.",
-                size=(54, 2),
+                size=(54, 2), text_color = ('gray'),
             )
         ],
         [
@@ -293,7 +293,7 @@ def make_layout() -> List[List[sg.Element]]:
         [
             sg.Text(
                 "For transits, clip residuals or light curve - model. Applied auto-clipped points stay excluded until Reset auto clipping; click-edit can reject or restore individual points.",
-                size=(54, 3),
+                size=(54, 3), text_color = ('gray'),
             )
         ],
     ]
@@ -317,27 +317,30 @@ def make_layout() -> List[List[sg.Element]]:
             sg.Listbox(
                 [],
                 key="-DET_REGRESSOR_LIST-",
-                size=(28, 8),
+                size=(28, 6),
                 enable_events=True,
                 disabled=True,
                 no_scrollbar=False,
             ),
-            sg.Text(
-                "Useful regressors are usually JD_UTC/time, AIRMASS, FWHM/Width, sky background and centroid X/Y.",
-                size=(22, 8),
+            sg.Column(
+                [
+                    [sg.Text( "Useful regressors are usually JD_UTC/time, AIRMASS, FWHM/Width, sky background and centroid X/Y.",size=(40, 3),text_color =('gray'))],
+                    [
+                        sg.Checkbox("Mask transit", default=True, key="-DET_MASK_TRANSIT-", disabled=True, tooltip='Masking the transit and considering only Out Of Transit points for calculating the detrend.\nI strongly suggest to keep activated, but you can try to deactivate and see the results!'),
+                        sg.Checkbox("Use clean mask", default=True, key="-DET_USE_CLEANING_MASK-", disabled=True, tooltip='Using the actual data points and neglecting automatically of manually rejected data points in the Cleaning tab\nDeactivate to use all the original data points of your dataset. If you did not reject any point, the result will not change'),
+                    ],
+                    [
+                        sg.Text("Poly", size=(5, 1)),
+                        sg.Combo(["1", "2"], default_value="1", key="-DET_POLY_ORDER-", size=(4, 1), readonly=True, disabled=True),
+                        sg.Text("sigma"),
+                        sg.Input("4.0", key="-DET_ROBUST_SIGMA-", size=(5, 1), disabled=True),
+                        sg.Text("iter"),
+                        sg.Input("3", key="-DET_ROBUST_ITER-", size=(4, 1), disabled=True),
+                    ],
+                ],
+                pad=(0, 0),
+                vertical_alignment="top",
             ),
-        ],
-        [
-            sg.Checkbox("Mask transit", default=True, key="-DET_MASK_TRANSIT-", disabled=True, tooltip='Masking the transit and considering only Out Of Transit points for calculating the detrend.\nI strongly suggest to keep activated, but you can try to deactivate and see the results!'),
-            sg.Checkbox("Use clean mask", default=True, key="-DET_USE_CLEANING_MASK-", disabled=True, tooltip='Using the actual data points and neglecting automatically of manually rejected data points in the Cleaning tab\nDeactivate to use all the original data points of your dataset. If you did not reject any point, the result will not change'),
-        # ],
-        # [
-            sg.Text("Poly", size=(5, 1)),
-            sg.Combo(["1", "2"], default_value="1", key="-DET_POLY_ORDER-", size=(4, 1), readonly=True, disabled=True),
-            sg.Text("sigma"),
-            sg.Input("4.0", key="-DET_ROBUST_SIGMA-", size=(5, 1), disabled=True),
-            sg.Text("iter"),
-            sg.Input("3", key="-DET_ROBUST_ITER-", size=(4, 1), disabled=True),
         ],
 
         [
@@ -376,7 +379,7 @@ def make_layout() -> List[List[sg.Element]]:
             sg.Multiline(
                 "",
                 key="-DET_REPORT-",
-                size=(54, 8),
+                size=(54, 7),
                 disabled=True,
                 autoscroll=False,
                 no_scrollbar=False,
@@ -397,7 +400,7 @@ def make_layout() -> List[List[sg.Element]]:
         [
             sg.Text(
                 "Use Compute stats to calculate N, cadence, mean, median, RMS, amplitude and error statistics.",
-                size=(54, 2),
+                size=(54, 2), text_color =('gray'),
             )
         ],
     ]
@@ -464,7 +467,7 @@ def make_layout() -> List[List[sg.Element]]:
             sg.Listbox(
                 [],
                 key="-COMP_STAR_LIST-",
-                size=(22, 10),
+                size=(22, 9),
                 enable_events=True,
                 disabled=True,
                 no_scrollbar=False,
@@ -473,7 +476,7 @@ def make_layout() -> List[List[sg.Element]]:
             sg.Multiline(
                 "",
                 key="-COMP_REPORT-",
-                size=(42, 10),
+                size=(42, 9),
                 disabled=True,
                 autoscroll=False,
                 no_scrollbar=False,
@@ -561,7 +564,7 @@ def make_layout() -> List[List[sg.Element]]:
         [
             sg.Text(
                 "Timing labels are optional plot overlays. They are shown only after a transit diagnostic run.",
-                size=(54, 2),
+                size=(54, 2), text_color = ('gray'),
             )
         ],
     ]
@@ -585,7 +588,7 @@ def make_layout() -> List[List[sg.Element]]:
     )
 
     buttons_row_1 = [
-        sg.Button("Plot / update", button_color=("white", "#2d6cdf"), size = (14,1), tooltip='Plot the lightcurve or update the plot after any change'),
+        sg.Button("Plot / update", button_color=("white", "#2d6cdf"), size = (14,1), tooltip='Plot the light curve or update the plot after any change'),
         sg.Button("Compute stats", size = (14,1), tooltip='Compute she statistics of your data, following the parameters in the Stats tab'),
         sg.Button("Run transit model", size = (14,1), tooltip='Run the fit of your transit and comparison with the model, according to the parameters set in the transit modeling tab'),
         sg.Button("Save figure", size = (14,1), tooltip='Save the plot in png format'),
@@ -595,14 +598,16 @@ def make_layout() -> List[List[sg.Element]]:
         
         sg.Button("Save stats", size = (14,1), tooltip='Save the statistics in an ASCII file, according to the stats tab parameters'),
         sg.Button("Save model results", size = (14,1), tooltip='Save the parameters, diagnostics and results of the transit model you have obtained'),
-        sg.Button("Save settings", size = (14,1), tooltip='Save the program settings'),
-        sg.Button("Load settings", size = (14,1), tooltip='Load your custom parameter settings'),
+        sg.Button("Reset view/data", size = (14,1), tooltip='Reset the plot and all the analysis performed'),
+        sg.Button("Save curve", size = (14,1), tooltip='Save the new light curve, with the detrend and model, if applied, in csv or ASCII file'),
+        # sg.Button("Save settings", size = (14,1), tooltip='Save the program settings'),
+        # sg.Button("Load settings", size = (14,1), tooltip='Load your custom parameter settings'),
     ]
 
     buttons_row_3 = [
 
-        sg.Button("Reset view/data", size = (14,1), tooltip='Reset the plot and all the analysis performed'),
-        sg.Button("Save curve", size = (14,1), tooltip='Save the new lightcurve, with the detrend and model, if applied, in csv or ASCII file'),
+        # sg.Button("Reset view/data", size = (14,1), tooltip='Reset the plot and all the analysis performed'),
+        # sg.Button("Save curve", size = (14,1), tooltip='Save the new light curve, with the detrend and model, if applied, in csv or ASCII file'),
         sg.Button("Save recipe", size = (14,1), tooltip='Save relevant info to reproduce and share your workflow: apertures, detrend, comparison stars, model settings...'),
         sg.Button("Exit", size = (14,1), button_color= ('black','light blue')),
         # sg.Button("Exit", size = (14,1)),
@@ -612,7 +617,7 @@ def make_layout() -> List[List[sg.Element]]:
 
 
     control_column = [
-        [sg.Frame("Start here: build a light curve or load a light curve file", file_frame, font=("Helvetica", 13, 'bold'))],
+        [sg.Frame("Start here: reduce images, build a light curve, or load a light curve file", file_frame, font=("Helvetica", 13, 'bold'))],
         [control_tabs],
         [sg.HorizontalSeparator()],
         buttons_row_1,
@@ -633,7 +638,7 @@ def make_layout() -> List[List[sg.Element]]:
 
     return [
         [sg.Menu([
-        ['&File', ['&Reduce img', '&Build LC', '&Save figure', 'Save stats', 'Save model results', 'Save settings', 'Load settings', 'Reset view/data', 'Save curve', 'Save recipe',  'E&xit']],
+        ['&File', ['&Reduce img', '&Build LC', '&Save figure', 'Save stats', 'Save model results', 'Reset view/data', 'Save curve', 'Save recipe',  'E&xit']],
         ['&Data', ['Load', 'Plot / update']],
         ['&Comp stars', ['Run comp optimizer']],
         ['Detrend', ['Run detrending', 'Clear detrending']],

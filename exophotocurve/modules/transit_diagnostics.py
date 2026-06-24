@@ -101,6 +101,11 @@ class TransitDiagnosticResult:
     limb_darkening_source: str
     catalogue_source: str
     catalogue_notes: str
+    catalogue_type: str
+    catalogue_depth_source: str
+    catalogue_rprs_source: str
+    catalogue_geometry_source: str
+    catalogue_stellar_source: str
     catalogue_t0_bjd_tdb: float
     catalogue_period_days: float
     predicted_epoch: int
@@ -112,6 +117,7 @@ class TransitDiagnosticResult:
     oc_minutes: float
     oc_unc_minutes: float
     catalogue_depth_ppt: float
+    geometric_depth_ppt: float
     expected_depth_ppt: float
     observed_depth_ppt: float
     expected_rp_rs: float
@@ -1050,7 +1056,8 @@ def run_transit_diagnostics(
     oc_minutes = dt_best * 24.0 * 60.0
     oc_unc_minutes = dt_unc * 24.0 * 60.0 if np.isfinite(dt_unc) else np.nan
 
-    catalogue_depth_ppt = float(planet.depth_ppt)
+    catalogue_depth_ppt = float(planet.expected_model_depth_ppt)
+    geometric_depth_ppt = (float(planet.rp_rs) ** 2) * 1000.0 if np.isfinite(planet.rp_rs) and planet.rp_rs > 0 else np.nan
     expected_model_depth_ppt = _model_depth_ppt_from_transit_model(
         planet=planet,
         tmid=tmid_pred,
@@ -1215,6 +1222,11 @@ def run_transit_diagnostics(
         limb_darkening_source=limb_darkening_source,
         catalogue_source=str(getattr(planet, "source", "")),
         catalogue_notes=str(getattr(planet, "notes", "")),
+        catalogue_type=str(getattr(planet, "catalogue_type", "")),
+        catalogue_depth_source=str(getattr(planet, "depth_source", "")),
+        catalogue_rprs_source=str(getattr(planet, "rprs_source", "")),
+        catalogue_geometry_source=str(getattr(planet, "geometry_source", "")),
+        catalogue_stellar_source=str(getattr(planet, "stellar_source", "")),
         catalogue_t0_bjd_tdb=float(planet.t0_bjd_tdb),
         catalogue_period_days=float(planet.period_days),
         predicted_epoch=int(_epoch),
@@ -1226,6 +1238,7 @@ def run_transit_diagnostics(
         oc_minutes=float(oc_minutes),
         oc_unc_minutes=float(oc_unc_minutes),
         catalogue_depth_ppt=float(catalogue_depth_ppt),
+        geometric_depth_ppt=float(geometric_depth_ppt),
         expected_depth_ppt=float(expected_depth_ppt),
         observed_depth_ppt=float(observed_depth_ppt),
         expected_rp_rs=float(expected_rp_rs),
@@ -1314,6 +1327,16 @@ def format_transit_report(result: TransitDiagnosticResult) -> str:
     lines.append("Ephemeris and timing reference")
     if str(result.catalogue_source).strip():
         lines.append(f"Catalogue source = {result.catalogue_source}")
+    if str(result.catalogue_type).strip():
+        lines.append(f"Catalogue type = {result.catalogue_type}")
+    if str(result.catalogue_depth_source).strip():
+        lines.append(f"Depth source = {result.catalogue_depth_source}")
+    if str(result.catalogue_rprs_source).strip():
+        lines.append(f"Rp/Rs source = {result.catalogue_rprs_source}")
+    if str(result.catalogue_geometry_source).strip():
+        lines.append(f"Geometry source = {result.catalogue_geometry_source}")
+    if str(result.catalogue_stellar_source).strip():
+        lines.append(f"Stellar source = {result.catalogue_stellar_source}")
     lines.append(f"Catalogue T0 = {_fmt(result.catalogue_t0_bjd_tdb, '.8f')} BJD_TDB")
     lines.append(f"Catalogue period = {_fmt(result.catalogue_period_days, '.10f')} d")
     lines.append(f"Epoch number = {result.predicted_epoch:d}")
@@ -1340,7 +1363,13 @@ def format_transit_report(result: TransitDiagnosticResult) -> str:
         f"(expected model {_fmt(result.expected_depth_ppt, '.2f')} ppt)"
     )
     if np.isfinite(result.catalogue_depth_ppt):
-        lines.append(f"Catalogue depth = {_fmt(result.catalogue_depth_ppt, '.2f')} ppt")
+        lines.append(f"Catalogue flux depth = {_fmt(result.catalogue_depth_ppt, '.2f')} ppt")
+    if (
+        np.isfinite(result.geometric_depth_ppt)
+        and np.isfinite(result.catalogue_depth_ppt)
+        and abs(result.geometric_depth_ppt - result.catalogue_depth_ppt) > 0.25
+    ):
+        lines.append(f"Geometric depth Rp/Rs^2 = {_fmt(result.geometric_depth_ppt, '.2f')} ppt")
     lines.append(
         f"Duration = {_fmt(result.observed_duration_hours, '.2f')} h "
         f"(expected {_fmt(result.expected_duration_hours, '.2f')} h)"

@@ -799,18 +799,14 @@ def build_processed_light_curve_export(
     manual_reject_indices: set[int],
     manual_keep_indices: set[int],
 ) -> Tuple[pd.DataFrame, Dict[str, object]]:
-    """Build a table containing the current processed light curve.
+    """Build the curated full ExoPhotoCurve light-curve export.
 
-    The exported table is now explicit about time systems.  The generic
-    ``time`` column is the current X column selected in the GUI; after a transit
-    fit this is often ``PhotoCurve_time_corrected``, i.e. BJD_TDB at
-    mid-exposure.  When available, the export also writes ``time_input``,
-    ``JD_UTC`` and ``time_bjd_tdb`` so the user can compare the result with
-    AstroImageJ/ExoClock JD_UTC tables without ambiguity.
-
-    By default, rejected points are not written.  This matches the visible and
-    analysis state of the plot.  Users can enable ``Export rejected points`` in
-    the Data tab to save all rows together with mask columns.
+    The full export is intentionally not a dump of all internal ``PhotoCurve_*``
+    columns.  It writes a stable, documented schema containing the original
+    differential/undetrended light curve, the detrended analysis curve, the
+    current/fit model, residuals and the masks used by the GUI.  This keeps the
+    file useful for external checks without exposing duplicate aliases produced
+    by repeated fitting.
     """
     if df is None or df.empty:
         raise ValueError("There is no table to export.")
@@ -825,82 +821,100 @@ def build_processed_light_curve_export(
     reserr_col = str(selection.get("-RESERR_COL-", NONE_COL))
 
     output: Dict[str, object] = {"row_index": np.arange(n_rows, dtype=int)}
+    source_columns: Dict[str, str] = {}
 
-    # Canonical time columns.  Keep them separate so that a saved curve can be
-    # used both for external timing checks and for comparison with the original
-    # AstroImageJ table.
-    input_time_column_for_export: Optional[str] = None
-    if "PhotoCurve_time_input" in df.columns:
-        _add_numeric_column_by_name(output, df, "time_input", "PhotoCurve_time_input")
+    def add_numeric(output_name: str, source_column: str) -> bool:
+        source = str(source_column).strip()
+        if not source or source == NONE_COL or source not in df.columns:
+            return False
+        arr = pd.to_numeric(df[source], errors="coerce").to_numpy(dtype=float)
+        if arr.size != n_rows:
+            return False
+        output[output_name] = arr
+        source_columns[output_name] = source
+        return True
+
+    def add_first(output_name: str, candidates: list[str]) -> str:
+        for candidate in candidates:
+            if add_numeric(output_name, candidate):
+                return candidate
+        return ""
+
+    # Canonical time columns.  ``time`` is the current analysis/plotting time;
+    # the other columns document the original input time and the BJD_TDB timing
+    # correction when available.
+    input_time_column_for_export = ""
+    if add_numeric("time_input", "PhotoCurve_time_input"):
         input_time_column_for_export = "PhotoCurve_time_input"
-    elif _is_selected_column(x_col) and x_col in df.columns:
-        _add_numeric_column_by_name(output, df, "time_input", x_col)
+    elif add_numeric("time_input", x_col):
         input_time_column_for_export = x_col
 
-    # ExoClock expects JD_UTC-style input columns.  When the analysis started
-    # from JD_UTC data, write an explicit JD_UTC alias in addition to the more
-    # descriptive ``time_input`` column.  Do not invent JD_UTC when the original
-    # input was already BJD_TDB or another time system.
     jd_utc_column_written = False
     time_system_upper = str(values.get("-TR_TIME_SYSTEM-", "")).strip().upper()
     if time_system_upper == "JD_UTC" and input_time_column_for_export:
-        jd_utc_column_written = _add_numeric_column_by_name(
-            output, df, "JD_UTC", input_time_column_for_export
-        )
-    elif _is_selected_column(x_col) and x_col in df.columns and "JD_UTC" in x_col.upper():
-        # Fallback for files where the GUI time-system selector was not updated
-        # but the selected column name is explicitly JD_UTC-like.
-        jd_utc_column_written = _add_numeric_column_by_name(output, df, "JD_UTC", x_col)
+        jd_utc_column_written = add_numeric("JD_UTC", input_time_column_for_export)
+    elif x_col in df.columns and "JD_UTC" in x_col.upper():
+        jd_utc_column_written = add_numeric("JD_UTC", x_col)
 
-    if "PhotoCurve_time_corrected" in df.columns:
-        _add_numeric_column_by_name(output, df, "time_bjd_tdb", "PhotoCurve_time_corrected")
+    add_numeric("time_bjd_tdb", "PhotoCurve_time_corrected")
+    add_numeric("time", x_col)
 
-    # Current GUI selection.  This is what the user is currently plotting and
-    # fitting.  It may be the same as one of the canonical time columns above.
-    _add_numeric_column_if_available(output, df, "time", x_col)
-    _add_numeric_column_if_available(output, df, "flux", y_col)
-    _add_numeric_column_if_available(output, df, "flux_error", yerr_col)
-    _add_numeric_column_if_available(output, df, "model", model_col)
-    _add_numeric_column_if_available(output, df, "residual", res_col)
-    _add_numeric_column_if_available(output, df, "residual_error", reserr_col)
+    # Current analysis/light-curve columns.  These generic names are kept for
+    # easy plotting and for the simple ExoClock/HOPS companion export.
+    add_numeric("flux", y_col)
+    add_numeric("flux_error", yerr_col)
 
-    # Add high-value intermediate/final columns if they exist.  These names are
-    # deliberately stable and useful for external analysis.  Skip duplicate time
-    # columns that are already present with clearer canonical names.
-    optional_columns = [
-        "PhotoCurve_compopt_time",
-        "PhotoCurve_compopt_flux",
-        "PhotoCurve_compopt_err",
-        "PhotoCurve_compopt_ensemble",
-        "PhotoCurve_det_time",
-        "PhotoCurve_det_flux",
-        "PhotoCurve_det_err",
-        "PhotoCurve_det_baseline",
-        "PhotoCurve_det_residual",
-        "PhotoCurve_time_input",
-        "PhotoCurve_time_corrected",
-        "PhotoCurve_flux_input",
-        "PhotoCurve_flux_err_input",
-        "PhotoCurve_baseline",
-        "PhotoCurve_detrended_flux",
-        "PhotoCurve_detrended_err",
-        "PhotoCurve_expected_transit_model",
-        "PhotoCurve_fit_transit_model",
-        "PhotoCurve_expected_full_model",
-        "PhotoCurve_fit_full_model",
-        "PhotoCurve_expected_model",
-        "PhotoCurve_fit_model",
-        "PhotoCurve_fit_residual",
-        "PhotoCurve_fit_detrended_residual",
-        "PhotoCurve_fit_full_residual",
-    ]
-    for column in optional_columns:
-        if column in df.columns and column not in output:
-            output[column] = pd.to_numeric(df[column], errors="coerce").to_numpy(dtype=float)
+    # Non-detrended, non-fitted light curve.  Prefer the comparison-star output,
+    # because it is the scientifically useful relative light curve before later
+    # decorrelation or transit-model baseline fitting.  Fall back gracefully for
+    # externally loaded light curves or analyses without the comparison module.
+    undetrended_flux_source = add_first(
+        "flux_undetrended",
+        ["PhotoCurve_compopt_flux", "PhotoCurve_flux_input", y_col],
+    )
+    undetrended_err_source = add_first(
+        "flux_undetrended_error",
+        ["PhotoCurve_compopt_err", "PhotoCurve_flux_err_input", yerr_col],
+    )
+    add_numeric("comparison_ensemble", "PhotoCurve_compopt_ensemble")
+
+    # Detrended/analysis curve.  Prefer the final transit-diagnostics detrended
+    # curve, then the photometric-detrending output, then the current flux.
+    detrended_flux_source = add_first(
+        "flux_detrended",
+        ["PhotoCurve_detrended_flux", "PhotoCurve_det_flux", y_col],
+    )
+    detrended_err_source = add_first(
+        "flux_detrended_error",
+        ["PhotoCurve_detrended_err", "PhotoCurve_det_err", yerr_col],
+    )
+    baseline_source = add_first(
+        "detrending_baseline",
+        ["PhotoCurve_baseline", "PhotoCurve_det_baseline"],
+    )
+
+    # Transit model and residuals.  The alias columns already respect the
+    # selected display mode, while the stable output names avoid duplicate
+    # PhotoCurve internal columns in the saved file.
+    expected_model_source = add_first(
+        "expected_model",
+        ["PhotoCurve_expected_model", "PhotoCurve_expected_transit_model"],
+    )
+    fit_model_source = add_first(
+        "fit_model",
+        ["PhotoCurve_fit_model", "PhotoCurve_fit_transit_model", model_col],
+    )
+    residual_source = add_first(
+        "residual",
+        ["PhotoCurve_fit_residual", "PhotoCurve_fit_detrended_residual", res_col],
+    )
+    residual_err_source = add_first(
+        "residual_error",
+        [reserr_col, "PhotoCurve_detrended_err", "PhotoCurve_det_err", yerr_col],
+    )
 
     # Current cleaning/manual mask.  Keep this independent of whether the user
-    # plans to apply it to statistics; it documents what the GUI is currently
-    # treating as rejected in the plot/analysis state.
+    # applies cleaning to statistics; it documents what the GUI treats as valid.
     x = to_numeric_array(df, x_col)
     y = to_numeric_array(df, y_col)
     model = to_numeric_array(df, model_col)
@@ -958,16 +972,32 @@ def build_processed_light_curve_export(
 
     exported = pd.DataFrame(output)
 
-    export_rejected_points = bool(values.get("-EXPORT_REJECTED_POINTS-", False))
-    if not export_rejected_points:
+    # By default the full export is complete and keeps rejected points with mask
+    # columns, similar to an audit table.  The existing GUI checkbox still lets
+    # advanced users write only the kept points if desired.
+    include_rejected_points = bool(values.get("-EXPORT_REJECTED_POINTS-", True))
+    if not include_rejected_points:
         exported = exported.loc[export_keep_mask].reset_index(drop=True)
 
     current_time_description = _describe_time_column(x_col, values)
-    input_time_description = _describe_time_column("PhotoCurve_time_input", values) if "PhotoCurve_time_input" in df.columns else _describe_time_column(x_col, values)
-    bjd_time_description = _describe_time_column("PhotoCurve_time_corrected", values) if "PhotoCurve_time_corrected" in df.columns else "not available"
+    input_time_description = (
+        _describe_time_column("PhotoCurve_time_input", values)
+        if "PhotoCurve_time_input" in df.columns
+        else _describe_time_column(x_col, values)
+    )
+    bjd_time_description = (
+        _describe_time_column("PhotoCurve_time_corrected", values)
+        if "PhotoCurve_time_corrected" in df.columns
+        else "not available"
+    )
 
     metadata = {
         "created_utc": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+        "export_schema_version": 2,
+        "full_export_content": (
+            "curated light-curve table: input time, analysis time, undetrended differential flux, "
+            "detrended flux, model, residuals and rejection masks"
+        ),
         "photometry_file": photometry_file_path or "",
         "catalogue_file": str(catalogue_path or ""),
         "planet": str(values.get("-TR_PLANET-", "")),
@@ -987,15 +1017,28 @@ def build_processed_light_curve_export(
         ),
         "flux_column": y_col,
         "error_column": yerr_col,
-        "model_column": model_col,
-        "residual_column": res_col,
+        "flux_undetrended_source": undetrended_flux_source,
+        "flux_undetrended_meaning": (
+            "differential light curve after comparison-star correction when available; "
+            "before photometric detrending and transit-model fitting"
+        ),
+        "flux_undetrended_error_source": undetrended_err_source,
+        "flux_detrended_source": detrended_flux_source,
+        "flux_detrended_meaning": "light curve after detrending, used for transit-model analysis when available",
+        "flux_detrended_error_source": detrended_err_source,
+        "detrending_baseline_source": baseline_source,
+        "expected_model_source": expected_model_source,
+        "fit_model_source": fit_model_source,
+        "residual_source": residual_source,
+        "residual_error_source": residual_err_source,
         "auto_sigma_rejected_indices": sorted(auto_reject_indices),
         "manual_rejected_indices": sorted(manual_reject_indices),
         "manual_restored_indices": sorted(manual_keep_indices),
-        "export_rejected_points": export_rejected_points,
+        "include_rejected_points_in_full_export": include_rejected_points,
         "n_rows_input_table": int(n_rows),
         "n_rows_exported": int(len(exported)),
-        "n_rows_rejected_or_not_exported": int(n_rows - len(exported)) if not export_rejected_points else 0,
+        "n_rows_kept_for_analysis_or_simple_export": int(np.count_nonzero(export_keep_mask)),
+        "n_rows_rejected_or_not_used": int(n_rows - np.count_nonzero(export_keep_mask)),
     }
 
     if last_transit_result is not None:
@@ -2434,7 +2477,6 @@ def main() -> None:
     
     # Handling the extreme scaling (>150%) on Windows systems
     if os.name == "nt":
-            
         # OS-reported scale used only as initial HINT
         try:
             dpi_scale = ctypes.windll.shcore.GetScaleFactorForDevice(0) / 100.0
@@ -3954,10 +3996,10 @@ def main() -> None:
                 "Save processed light curve",
                 save_as=True,
                 no_window=True,
-                default_extension=".csv",
+                default_extension=".txt",
                 file_types=(
-                    ("CSV table", "*.csv"),
                     ("Tab-separated text", "*.txt;*.dat;*.tsv"),
+                    ("CSV table", "*.csv"),
                     ("JSON", "*.json"),
                     ("All files", "*.*"),
                 ),
@@ -4133,81 +4175,81 @@ def main() -> None:
                 except Exception as exc:
                     sg.popup_error(f"Could not save figure:\n{exc}")
 
-        if event == "Save settings":
-            save_path = sg.popup_get_file(
-                "Save settings as JSON",
-                save_as=True,
-                no_window=True,
-                default_extension=".json",
-                file_types=(
-                    ("JSON", "*.json"),
-                    ("All files", "*.*"),
-                ),
-            )
-
-            if save_path:
-                try:
-                    save_config(save_path, values)
-                    window["-STATUS-"].update(f"Settings saved: {save_path}")
-                except Exception as exc:
-                    sg.popup_error(f"Could not save settings:\n{exc}")
-
-        if event == "Load settings":
-            config_path = sg.popup_get_file(
-                "Load settings JSON",
-                no_window=True,
-                file_types=(
-                    ("JSON", "*.json"),
-                    ("All files", "*.*"),
-                ),
-            )
-
-            if config_path:
-                try:
-                    config = load_config(config_path)
-                    apply_config(window, config)
-                    auto_reject_indices = _parse_index_set_text(config.get("-AUTO_REJECT_INDICES-", ""))
-                    manual_reject_indices = _parse_index_set_text(config.get("-MANUAL_REJECT_INDICES-", ""))
-                    manual_keep_indices = _parse_index_set_text(config.get("-MANUAL_KEEP_INDICES-", ""))
-                    update_auto_clip_controls(window, auto_reject_indices)
-                    update_manual_point_controls(window, manual_reject_indices, manual_keep_indices)
-
-                    file_path = str(config.get("-FILE-", "")).strip()
-
-                    if file_path and os.path.exists(file_path):
-                        df = read_ascii_table(
-                            file_path,
-                            str(config.get("-DELIM-", "Auto")),
-                            bool(config.get("-HEADER-", True)),
-                        )
-
-                        original_df = df.copy(deep=True)
-                        cols = numeric_columns(df)
-                        original_column_selection = update_combo_values(window, cols, df=df, sync_transit_time_system=True)
-                        pre_transit_column_selection = original_column_selection.copy()
-                        last_detrend_input_selection = None
-                        aij_flux_detection = detect_aij_flux_columns(df)
-                        comp_active_stars = set(aij_flux_detection.comparison_ids) if aij_flux_detection.compatible else set()
-                        update_comparison_tab(window, aij_flux_detection, comp_active_stars)
-                        auto_reject_indices.clear()
-                        manual_reject_indices.clear()
-                        manual_keep_indices.clear()
-                        update_auto_clip_controls(window, auto_reject_indices)
-                        update_manual_point_controls(window, manual_reject_indices, manual_keep_indices)
-                        apply_config(window, config)
-                        auto_reject_indices = _parse_index_set_text(config.get("-AUTO_REJECT_INDICES-", ""))
-                        manual_reject_indices = _parse_index_set_text(config.get("-MANUAL_REJECT_INDICES-", ""))
-                        manual_keep_indices = _parse_index_set_text(config.get("-MANUAL_KEEP_INDICES-", ""))
-                        update_auto_clip_controls(window, auto_reject_indices)
-                        update_manual_point_controls(window, manual_reject_indices, manual_keep_indices)
-
-                        window["-NROWS-"].update(str(len(df)))
-                        window["-NCOLS-"].update(str(len(df.columns)))
-
-                    window["-STATUS-"].update(f"Settings loaded: {config_path}")
-
-                except Exception as exc:
-                    sg.popup_error(f"Could not load settings:\n{exc}")
+        # if event == "Save settings":
+        #     save_path = sg.popup_get_file(
+        #         "Save settings as JSON",
+        #         save_as=True,
+        #         no_window=True,
+        #         default_extension=".json",
+        #         file_types=(
+        #             ("JSON", "*.json"),
+        #             ("All files", "*.*"),
+        #         ),
+        #     )
+        # 
+        #     if save_path:
+        #         try:
+        #             save_config(save_path, values)
+        #             window["-STATUS-"].update(f"Settings saved: {save_path}")
+        #         except Exception as exc:
+        #             sg.popup_error(f"Could not save settings:\n{exc}")
+        # 
+        # if event == "Load settings":
+        #     config_path = sg.popup_get_file(
+        #         "Load settings JSON",
+        #         no_window=True,
+        #         file_types=(
+        #             ("JSON", "*.json"),
+        #             ("All files", "*.*"),
+        #         ),
+        #     )
+        # 
+        #     if config_path:
+        #         try:
+        #             config = load_config(config_path)
+        #             apply_config(window, config)
+        #             auto_reject_indices = _parse_index_set_text(config.get("-AUTO_REJECT_INDICES-", ""))
+        #             manual_reject_indices = _parse_index_set_text(config.get("-MANUAL_REJECT_INDICES-", ""))
+        #             manual_keep_indices = _parse_index_set_text(config.get("-MANUAL_KEEP_INDICES-", ""))
+        #             update_auto_clip_controls(window, auto_reject_indices)
+        #             update_manual_point_controls(window, manual_reject_indices, manual_keep_indices)
+        # 
+        #             file_path = str(config.get("-FILE-", "")).strip()
+        # 
+        #             if file_path and os.path.exists(file_path):
+        #                 df = read_ascii_table(
+        #                     file_path,
+        #                     str(config.get("-DELIM-", "Auto")),
+        #                     bool(config.get("-HEADER-", True)),
+        #                 )
+        # 
+        #                 original_df = df.copy(deep=True)
+        #                 cols = numeric_columns(df)
+        #                 original_column_selection = update_combo_values(window, cols, df=df, sync_transit_time_system=True)
+        #                 pre_transit_column_selection = original_column_selection.copy()
+        #                 last_detrend_input_selection = None
+        #                 aij_flux_detection = detect_aij_flux_columns(df)
+        #                 comp_active_stars = set(aij_flux_detection.comparison_ids) if aij_flux_detection.compatible else set()
+        #                 update_comparison_tab(window, aij_flux_detection, comp_active_stars)
+        #                 auto_reject_indices.clear()
+        #                 manual_reject_indices.clear()
+        #                 manual_keep_indices.clear()
+        #                 update_auto_clip_controls(window, auto_reject_indices)
+        #                 update_manual_point_controls(window, manual_reject_indices, manual_keep_indices)
+        #                 apply_config(window, config)
+        #                 auto_reject_indices = _parse_index_set_text(config.get("-AUTO_REJECT_INDICES-", ""))
+        #                 manual_reject_indices = _parse_index_set_text(config.get("-MANUAL_REJECT_INDICES-", ""))
+        #                 manual_keep_indices = _parse_index_set_text(config.get("-MANUAL_KEEP_INDICES-", ""))
+        #                 update_auto_clip_controls(window, auto_reject_indices)
+        #                 update_manual_point_controls(window, manual_reject_indices, manual_keep_indices)
+        # 
+        #                 window["-NROWS-"].update(str(len(df)))
+        #                 window["-NCOLS-"].update(str(len(df.columns)))
+        # 
+        #             window["-STATUS-"].update(f"Settings loaded: {config_path}")
+        # 
+        #         except Exception as exc:
+        #             sg.popup_error(f"Could not load settings:\n{exc}")
 
     delete_figure_agg(fig_agg)
     window.close()

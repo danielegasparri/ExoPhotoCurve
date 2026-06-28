@@ -488,7 +488,7 @@ def make_layout() -> List[List[sg.Element]]:
     transit_tab = [
         [
             sg.Text("Catalogue", size=(9, 1)),
-            sg.Input(str(default_catalogue_path()), key="-TR_CATALOG-", size=(36, 1)),
+            sg.Input(str(default_exoclock_catalogue_path()), key="-TR_CATALOG-", size=(36, 1)),
             sg.FileBrowse(button_text="Browse", file_types=(("CSV catalogue", "*.csv"), ("All files", "*.*"))),
             sg.Button("Load catalogue", tooltip='Browse and load here your custom exoplanet catalogue, if you have it'),
         ],
@@ -638,7 +638,7 @@ def make_layout() -> List[List[sg.Element]]:
 
     return [
         [sg.Menu([
-        ['&File', ['&Reduce img', '&Build LC', '&Save figure', 'Save stats', 'Save model results', 'Reset view/data', 'Save curve', 'Save recipe',  'E&xit']],
+        ['&File', ['&Reduce img', '&Build LC', '&Save figure', 'Save stats', 'Save model results', 'Reset view/data', 'Save curve', 'Save recipe', 'Reset user preferences',  'E&xit']],
         ['&Data', ['Load', 'Plot / update']],
         ['&Comp stars', ['Run comp optimizer']],
         ['Detrend', ['Run detrending', 'Clear detrending']],

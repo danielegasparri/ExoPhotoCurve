@@ -84,6 +84,13 @@ try:
         result_to_dict,
         run_transit_diagnostics,
     )
+
+    from modules.user_preferences import (
+        apply_preferences_to_window,
+        preferences_path,
+        reset_preferences,
+        save_window_preferences,
+    )
     from modules.statistics_utils import (
         SeriesStatistics,
         compute_series_statistics,
@@ -136,6 +143,14 @@ except ModuleNotFoundError: #local import if executed as package
         result_to_dict,
         run_transit_diagnostics,
     )
+
+    from .modules.user_preferences import (
+        apply_preferences_to_window,
+        preferences_path,
+        reset_preferences,
+        save_window_preferences,
+    )
+
     from .modules.statistics_utils import (
         SeriesStatistics,
         compute_series_statistics,
@@ -146,6 +161,70 @@ except ModuleNotFoundError: #local import if executed as package
 #Define the base dir of SPAN in your device
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 icon_path = os.path.join(BASE_DIR, "ExoPhotoCurve.ico")
+
+# Whitelisted persistent preferences for the main GUI.
+# This list intentionally excludes loaded-file paths, dynamic table columns,
+# selected planet, Tmid override, masks, comparison-star IDs and fit products.
+MAIN_PREFERENCE_KEYS = [
+    # Input/default parsing and export behavior.
+    "-DELIM-", "-HEADER-",
+    "-EXPORT_REJECTED_POINTS-", "-EXPORT_SIMPLE_EXOCLOCK-",
+    # Plot and style defaults.
+    "-FIG_W-", "-FIG_H-", "-DPI-", "-TITLE-", "-XLABEL-", "-YLABEL-",
+    "-XMODE-", "-XOFFSET-", "-XMIN-", "-XMAX-", "-YMIN-", "-YMAX-",
+    "-INVERT_Y-", "-GRID-", "-GRID_ALPHA-", "-LEGEND-", "-LEGEND_LOC-",
+    "-LC_COLOUR-", "-LC_OFFSET-", "-MARKER-", "-MSIZE-", "-ALPHA-",
+    "-ERR_COLOUR-", "-ERR_ALPHA-", "-MODEL_COLOUR-", "-EXPECTED_MODEL_COLOUR-",
+    "-RES_COLOUR-", "-ZERO_COLOUR-", "-LW-", "-PLOT_LAYOUT-",
+    "-LEG_LC-", "-LEG_MODEL-", "-LEG_RES-", "-LEG_ZERO-", "-SHOW_RMS-",
+    # Binning/statistics/cleaning parameter defaults.
+    "-BIN_N-", "-BIN_MARKER-", "-BIN_MARKER_SIZE-", "-BIN_COLOUR-",
+    "-BIN_ERR_COLOUR-", "-BIN_ALPHA-", "-BIN_SHOW_ERR-", "-BIN_LEGEND-",
+    "-STATS_TARGET-", "-STATS_YTYPE-", "-STATS_USE_TRANSFORMED_X-",
+    "-STATS_INCLUDE_BINNED-", "-STATS_SHOW_POPUP-",
+    "-CLEAN_TARGET-", "-CLEAN_SIGMA-", "-CLEAN_MAXITER-", "-CLEAN_SCALE-",
+    "-CLEAN_CENTRE-", "-CLEAN_APPLY_STATS-", "-CLEAN_SHOW_REJECTED-",
+    "-CLEAN_REJ_MARKER-", "-CLEAN_REJ_SIZE-", "-CLEAN_REJ_COLOUR-",
+    "-CLEAN_REJ_ALPHA-", "-CLEAN_REJ_LEGEND-",
+    # Comparison-star optimization defaults.
+    "-COMP_MODE-", "-COMP_MIN_STARS-", "-COMP_MAX_STARS-",
+    "-COMP_IMPROVE_THRESHOLD-", "-COMP_MASK_TRANSIT-", "-COMP_POLY_ORDER-",
+    "-COMP_SEND_TO_DATA-", "-COMP_SHOW_POPUP-", "-COMP_PLOT_DIAG-",
+    # Detrending defaults. Session-specific meridian flip time/active state is not persisted.
+    "-DET_MASK_TRANSIT-", "-DET_USE_CLEANING_MASK-", "-DET_POLY_ORDER-",
+    "-DET_ROBUST_SIGMA-", "-DET_ROBUST_ITER-", "-DET_FLIP_MODE-",
+    "-DET_SHOW_FLIP_MARKER-", "-DET_USE_TRANSIT_MODEL-", "-DET_SEND_TO_DATA-",
+    "-DET_SHOW_POPUP-", "-DET_MODEL_ITER_MODE-", "-DET_MODEL_MAX_ITER-",
+    "-DET_MODEL_TOL_PCT-",
+    # Transit modeling defaults. Planet name and manual Tmid override are analysis-specific.
+    "-TR_FILTER-", "-TR_EXPTIME-", "-TR_TIME_SYSTEM-",
+    "-TR_TIMESTAMP_REF-", "-TR_BASELINE-", "-TR_MODEL_ENGINE-",
+    "-TR_DISPLAY_MODE-", "-TR_OBS_LAT-", "-TR_OBS_LON-", "-TR_OBS_ALT-",
+    "-TR_FIT_TMID-", "-TR_FIT_DEPTH-", "-TR_FIT_DURATION-",
+    "-TR_SET_MODEL_COLUMNS-", "-TR_SHOW_POPUP-",
+    "-TR_SHOW_PREDICTED_TIMES-", "-TR_SHOW_CALCULATED_TIMES-",
+]
+
+
+def _catalogue_label_from_path(path: str) -> str:
+    """Return a human-readable label for a preferred catalogue path."""
+    try:
+        resolved = Path(path).resolve()
+        if resolved == default_catalogue_path().resolve():
+            return "NASA"
+        if resolved == default_exoclock_catalogue_path().resolve():
+            return "ExoClock"
+    except Exception:
+        pass
+    return "custom"
+
+
+def save_main_user_preferences(window: sg.Window) -> None:
+    """Persist safe main-window preferences without saving analysis state."""
+    try:
+        save_window_preferences(window, "main", MAIN_PREFERENCE_KEYS)
+    except Exception:
+        pass
 
 def center_window(window, margin=20):
     """
@@ -361,6 +440,82 @@ def resolve_meridian_flip_time_from_fraction(x_values: np.ndarray, fraction_valu
     integer_part = float(np.floor(np.nanmedian(finite)))
     return integer_part + value
 
+def _interp_time_column_value(value: float, src: np.ndarray, dst: np.ndarray) -> Optional[float]:
+    """Map a scalar time from one time column to another using row pairs."""
+    if not np.isfinite(value):
+        return None
+    src = np.asarray(src, dtype=float)
+    dst = np.asarray(dst, dtype=float)
+    valid = np.isfinite(src) & np.isfinite(dst)
+    if np.count_nonzero(valid) < 2:
+        return float(value)
+
+    src_valid = src[valid]
+    dst_valid = dst[valid]
+    order = np.argsort(src_valid)
+    src_sorted = src_valid[order]
+    dst_sorted = dst_valid[order]
+    unique_src, unique_idx = np.unique(src_sorted, return_index=True)
+    unique_dst = dst_sorted[unique_idx]
+    if unique_src.size < 2:
+        return float(value)
+
+    if unique_src[0] <= value <= unique_src[-1]:
+        return float(np.interp(value, unique_src, unique_dst))
+
+    if value < unique_src[0]:
+        x0, x1 = unique_src[0], unique_src[1]
+        y0, y1 = unique_dst[0], unique_dst[1]
+    else:
+        x0, x1 = unique_src[-2], unique_src[-1]
+        y0, y1 = unique_dst[-2], unique_dst[-1]
+    if not np.isfinite(x1 - x0) or abs(x1 - x0) < 1.0e-12:
+        return float(value)
+    return float(y0 + (value - x0) * (y1 - y0) / (x1 - x0))
+
+
+def resolve_meridian_flip_time_for_column(
+    df: pd.DataFrame,
+    x_col: str,
+    x_values: np.ndarray,
+    fraction_value: object,
+) -> Optional[float]:
+    """Resolve the meridian-flip time in the currently selected detrending X column.
+
+    The fraction entered by the user refers to the observing-time axis, usually
+    JD_UTC.  In the normal workflow the selected X column remains that same
+    axis.  If the user explicitly switches to ``PhotoCurve_time_corrected``
+    after a transit fit, the same physical flip time is mapped from
+    ``PhotoCurve_time_input`` to the corrected BJD_TDB column before the
+    detrending correction is applied.
+    """
+    x_col = str(x_col)
+    input_time = None
+    if df is not None and "PhotoCurve_time_input" in df.columns:
+        input_arr = to_numeric_array(df, "PhotoCurve_time_input")
+        if input_arr is not None:
+            input_time = resolve_meridian_flip_time_from_fraction(input_arr, fraction_value)
+    if input_time is None:
+        input_time = resolve_meridian_flip_time_from_fraction(x_values, fraction_value)
+    if input_time is None or not np.isfinite(input_time):
+        return None
+
+    if x_col == "PhotoCurve_time_corrected" and "PhotoCurve_time_input" in df.columns and "PhotoCurve_time_corrected" in df.columns:
+        input_arr = to_numeric_array(df, "PhotoCurve_time_input")
+        corrected_arr = to_numeric_array(df, "PhotoCurve_time_corrected")
+        if input_arr is not None and corrected_arr is not None:
+            mapped = _interp_time_column_value(float(input_time), input_arr, corrected_arr)
+            return mapped
+
+    if x_col in df.columns and x_col != "PhotoCurve_time_input" and "PhotoCurve_time_input" in df.columns:
+        input_arr = to_numeric_array(df, "PhotoCurve_time_input")
+        visible_arr = to_numeric_array(df, x_col)
+        if input_arr is not None and visible_arr is not None and input_arr.shape == visible_arr.shape:
+            mapped = _interp_time_column_value(float(input_time), input_arr, visible_arr)
+            return mapped
+
+    return float(input_time)
+
 def _selection_uses_prefix(selection: Optional[Dict[str, str]], prefixes: Tuple[str, ...]) -> bool:
     """Return True if any selected column starts with one of *prefixes*."""
     if not selection:
@@ -502,10 +657,15 @@ def clear_downstream_analysis_columns(df: pd.DataFrame) -> pd.DataFrame:
     return clear_transit_diagnostic_columns(df)
 
 def transit_display_selection(display_mode: str) -> Dict[str, str]:
-    """Return the column mapping used to display the current transit result."""
+    """Return the non-time column mapping used to display a transit result.
+
+    Transit fitting is performed internally in BJD_TDB, but the plotting X axis
+    should remain in the user-visible time system unless the user explicitly
+    selects another X column.  Therefore this helper intentionally does not set
+    ``-XCOL-``; ``set_transit_plot_columns`` preserves the pre-fit X column.
+    """
     if display_mode == "Detrended flux":
         return {
-            "-XCOL-": "PhotoCurve_time_corrected",
             "-YCOL-": "PhotoCurve_detrended_flux",
             "-YERRCOL-": "PhotoCurve_detrended_err",
             "-MODEL_COL-": "PhotoCurve_fit_model",
@@ -515,7 +675,6 @@ def transit_display_selection(display_mode: str) -> Dict[str, str]:
         }
 
     return {
-        "-XCOL-": "PhotoCurve_time_corrected",
         "-MODEL_COL-": "PhotoCurve_fit_model",
         "-RES_COL-": "PhotoCurve_fit_residual",
     }
@@ -573,6 +732,15 @@ def set_transit_plot_columns(
         return update_values_with_selection(values, original_selection)
 
     selection = transit_display_selection(display_mode)
+
+    # Keep the plotted time axis in the same user-visible system that was used
+    # before the transit fit.  The fit itself still uses BJD_TDB internally via
+    # run_transit_diagnostics; only the display column is preserved here.
+    if original_selection:
+        selection["-XCOL-"] = original_selection.get("-XCOL-", values.get("-XCOL-", NONE_COL))
+    else:
+        selection["-XCOL-"] = str(values.get("-XCOL-", NONE_COL))
+
     if display_mode != "Detrended flux" and original_selection:
         # Raw diagnostic display: keep the original photometry on the Y axis,
         # but show the full baseline-multiplied transit models and residuals.
@@ -2517,6 +2685,7 @@ def main() -> None:
         )
         
     center_window(window)
+    apply_preferences_to_window(window, "main", MAIN_PREFERENCE_KEYS)
     df: Optional[pd.DataFrame] = None
     original_df: Optional[pd.DataFrame] = None
     original_column_selection: Optional[Dict[str, str]] = None
@@ -2545,10 +2714,17 @@ def main() -> None:
     manual_keep_indices: set[int] = set()
 
     try:
+        preferred_catalogue = str(window["-TR_CATALOG-"].get()).strip() or str(default_exoclock_catalogue_path())
+        if not Path(preferred_catalogue).exists():
+            preferred_catalogue = str(default_exoclock_catalogue_path())
+            try:
+                window["-TR_CATALOG-"].update(preferred_catalogue)
+            except Exception:
+                pass
         exoplanet_catalogue = load_catalogue_into_window(
             window,
-            str(default_exoclock_catalogue_path()),
-            source_label="ExoClock",
+            preferred_catalogue,
+            source_label=_catalogue_label_from_path(preferred_catalogue),
         )
     except Exception as exc:
         window["-STATUS-"].update(f"Transit catalogue not loaded: {exc}")
@@ -2558,6 +2734,11 @@ def main() -> None:
     update_detrend_fit_model_control(window, None, None)
     update_manual_point_controls(window, manual_reject_indices, manual_keep_indices)
     update_auto_clip_controls(window, auto_reject_indices)
+
+    # If preferences are reset from the menu, do not save the current main
+    # window values on exit in the same session. Otherwise the just-deleted
+    # preferences file would be immediately recreated with the old values.
+    user_preferences_reset_this_session = False
 
     # Keep DPI awareness on Windows for crisp rendering
     if os.name == "nt":
@@ -2571,7 +2752,27 @@ def main() -> None:
         event, values = window.read()
 
         if event in (sg.WINDOW_CLOSED, "Exit"):
+            if not user_preferences_reset_this_session:
+                save_main_user_preferences(window)
             break
+
+
+        if event == "Reset user preferences":
+            removed = reset_preferences()
+            user_preferences_reset_this_session = True
+            message = (
+                "User preferences were reset. Restart ExoPhotoCurve to reload the original defaults. "
+                "The current main-window values will not be saved again when you close this session."
+                if removed else
+                "No user-preferences file was found. The original defaults will be used on next start. "
+                "The current main-window values will not be saved when you close this session."
+            )
+            try:
+                window["-STATUS-"].update(message)
+            except Exception:
+                pass
+            sg.popup_ok(message + f"\n\nPreferences path:\n{preferences_path()}", title="ExoPhotoCurve preferences")
+            continue
 
 
         if event == 'User manual':
@@ -2776,7 +2977,7 @@ def main() -> None:
                     catalog_path,
                     current_planet=str(values.get("-TR_PLANET-", "")).strip(),
                     autodetect_text=Path(current_photometry_file_path).name if current_photometry_file_path else "",
-                    source_label="custom",
+                    source_label=_catalogue_label_from_path(catalog_path),
                 )
             except Exception as exc:
                 sg.popup_error(f"Could not load transit catalogue:\n{exc}")
@@ -3192,7 +3393,7 @@ def main() -> None:
                             catalog_path,
                             current_planet=str(values.get("-TR_PLANET-", "")).strip(),
                             autodetect_text=Path(current_photometry_file_path).name if current_photometry_file_path else "",
-                            source_label="custom",
+                            source_label=_catalogue_label_from_path(catalog_path),
                         )
                     planet = find_planet(exoplanet_catalogue, str(values.get("-TR_PLANET-", "")))
 
@@ -3210,7 +3411,12 @@ def main() -> None:
 
                 flip_time = None
                 if bool(values.get("-DET_FLIP_ACTIVE-", False)):
-                    flip_time = resolve_meridian_flip_time_from_fraction(x, values.get("-DET_FLIP_FRAC-", ""))
+                    flip_time = resolve_meridian_flip_time_for_column(
+                        df,
+                        x_col,
+                        x,
+                        values.get("-DET_FLIP_FRAC-", ""),
+                    )
                     if flip_time is None:
                         raise ValueError(
                             "Meridian flip is enabled but the flip time fraction is invalid. "
@@ -3851,7 +4057,7 @@ def main() -> None:
                         catalog_path,
                         current_planet=str(values.get("-TR_PLANET-", "")).strip(),
                         autodetect_text=Path(current_photometry_file_path).name if current_photometry_file_path else "",
-                        source_label="custom",
+                        source_label=_catalogue_label_from_path(catalog_path),
                     )
 
                 planet = find_planet(exoplanet_catalogue, str(values.get("-TR_PLANET-", "")))
@@ -4174,82 +4380,6 @@ def main() -> None:
                     window["-STATUS-"].update(f"Figure saved: {save_path}")
                 except Exception as exc:
                     sg.popup_error(f"Could not save figure:\n{exc}")
-
-        # if event == "Save settings":
-        #     save_path = sg.popup_get_file(
-        #         "Save settings as JSON",
-        #         save_as=True,
-        #         no_window=True,
-        #         default_extension=".json",
-        #         file_types=(
-        #             ("JSON", "*.json"),
-        #             ("All files", "*.*"),
-        #         ),
-        #     )
-        # 
-        #     if save_path:
-        #         try:
-        #             save_config(save_path, values)
-        #             window["-STATUS-"].update(f"Settings saved: {save_path}")
-        #         except Exception as exc:
-        #             sg.popup_error(f"Could not save settings:\n{exc}")
-        # 
-        # if event == "Load settings":
-        #     config_path = sg.popup_get_file(
-        #         "Load settings JSON",
-        #         no_window=True,
-        #         file_types=(
-        #             ("JSON", "*.json"),
-        #             ("All files", "*.*"),
-        #         ),
-        #     )
-        # 
-        #     if config_path:
-        #         try:
-        #             config = load_config(config_path)
-        #             apply_config(window, config)
-        #             auto_reject_indices = _parse_index_set_text(config.get("-AUTO_REJECT_INDICES-", ""))
-        #             manual_reject_indices = _parse_index_set_text(config.get("-MANUAL_REJECT_INDICES-", ""))
-        #             manual_keep_indices = _parse_index_set_text(config.get("-MANUAL_KEEP_INDICES-", ""))
-        #             update_auto_clip_controls(window, auto_reject_indices)
-        #             update_manual_point_controls(window, manual_reject_indices, manual_keep_indices)
-        # 
-        #             file_path = str(config.get("-FILE-", "")).strip()
-        # 
-        #             if file_path and os.path.exists(file_path):
-        #                 df = read_ascii_table(
-        #                     file_path,
-        #                     str(config.get("-DELIM-", "Auto")),
-        #                     bool(config.get("-HEADER-", True)),
-        #                 )
-        # 
-        #                 original_df = df.copy(deep=True)
-        #                 cols = numeric_columns(df)
-        #                 original_column_selection = update_combo_values(window, cols, df=df, sync_transit_time_system=True)
-        #                 pre_transit_column_selection = original_column_selection.copy()
-        #                 last_detrend_input_selection = None
-        #                 aij_flux_detection = detect_aij_flux_columns(df)
-        #                 comp_active_stars = set(aij_flux_detection.comparison_ids) if aij_flux_detection.compatible else set()
-        #                 update_comparison_tab(window, aij_flux_detection, comp_active_stars)
-        #                 auto_reject_indices.clear()
-        #                 manual_reject_indices.clear()
-        #                 manual_keep_indices.clear()
-        #                 update_auto_clip_controls(window, auto_reject_indices)
-        #                 update_manual_point_controls(window, manual_reject_indices, manual_keep_indices)
-        #                 apply_config(window, config)
-        #                 auto_reject_indices = _parse_index_set_text(config.get("-AUTO_REJECT_INDICES-", ""))
-        #                 manual_reject_indices = _parse_index_set_text(config.get("-MANUAL_REJECT_INDICES-", ""))
-        #                 manual_keep_indices = _parse_index_set_text(config.get("-MANUAL_KEEP_INDICES-", ""))
-        #                 update_auto_clip_controls(window, auto_reject_indices)
-        #                 update_manual_point_controls(window, manual_reject_indices, manual_keep_indices)
-        # 
-        #                 window["-NROWS-"].update(str(len(df)))
-        #                 window["-NCOLS-"].update(str(len(df.columns)))
-        # 
-        #             window["-STATUS-"].update(f"Settings loaded: {config_path}")
-        # 
-        #         except Exception as exc:
-        #             sg.popup_error(f"Could not load settings:\n{exc}")
 
     delete_figure_agg(fig_agg)
     window.close()

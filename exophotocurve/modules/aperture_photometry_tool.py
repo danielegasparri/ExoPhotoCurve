@@ -18,6 +18,7 @@ import math
 import os
 import time
 from . import misc
+from .user_preferences import apply_preferences_to_window, save_window_preferences
 
 import numpy as np
 import pandas as pd
@@ -37,6 +38,26 @@ except Exception:  # pragma: no cover
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 icon_path = os.path.join(BASE_DIR, "ExoPhotoCurve.ico")
+
+# Whitelisted preferences for the aperture-photometry tool.  Selected stars,
+# current image index, report text and generated output paths are session state
+# and are intentionally not stored here.
+APERTURE_PHOTOMETRY_PREFERENCE_KEYS = [
+    "-PHOTO_PATTERN-", "-PHOTO_APER_R-", "-PHOTO_SKY_IN-", "-PHOTO_SKY_OUT-",
+    "-PHOTO_SNAP_CLICK-", "-PHOTO_RECENTER-", "-PHOTO_SEARCH_R-",
+    "-PHOTO_SAT_LEVEL-", "-PHOTO_PEAK_LOW_FRAC-", "-PHOTO_PEAK_HIGH_FRAC-",
+    "-PHOTO_PEAK_MAX_FRAMES-", "-PHOTO_AUTO_MAX_COMPS-",
+    "-PHOTO_AUTO_MIN_DIST-", "-PHOTO_TIME_KEYS-", "-PHOTO_EXPTIME_KEYS-",
+    "-PHOTO_AIRMASS_KEYS-", "-PHOTO_FILTER_KEYS-", "-PHOTO_TIME_REF-",
+    "-PHOTO_MAIN_JDUTC-", "-PHOTO_LOW_P-", "-PHOTO_HIGH_P-",
+]
+
+
+def _save_photometry_preferences(window: sg.Window) -> None:
+    try:
+        save_window_preferences(window, "aperture_photometry", APERTURE_PHOTOMETRY_PREFERENCE_KEYS)
+    except Exception:
+        pass
 
 @dataclass
 class ApertureStar:
@@ -303,6 +324,101 @@ def _aperture_stats_at(image: Optional[np.ndarray], x: float, y: float, radius: 
     if values.size == 0:
         return pixel, math.nan, math.nan
     return pixel, float(np.nanmax(values)), float(np.nanmean(values))
+
+
+def _candidate_shape_metrics(
+    image: Optional[np.ndarray],
+    x: float,
+    y: float,
+    aperture_radius: float,
+) -> Dict[str, float]:
+    """Return simple PSF-shape diagnostics for an automatic star candidate.
+
+    Hot pixels/cosmic-ray residuals can have peak values inside the allowed
+    range but are much sharper than real stellar profiles.  These diagnostics
+    intentionally use only the current image and conservative moment estimates,
+    so they remain fast and deterministic.
+    """
+    if image is None:
+        return {"valid": 0.0}
+    arr = np.asarray(image, dtype=float)
+    ny, nx = arr.shape
+    r = int(max(3, min(8, round(float(aperture_radius)))))
+    ix = int(round(float(x)))
+    iy = int(round(float(y)))
+    x1 = max(0, ix - r)
+    x2 = min(nx, ix + r + 1)
+    y1 = max(0, iy - r)
+    y2 = min(ny, iy + r + 1)
+    patch = arr[y1:y2, x1:x2]
+    if patch.size < 9 or not np.isfinite(patch).any():
+        return {"valid": 0.0}
+
+    finite = patch[np.isfinite(patch)]
+    sky = float(np.nanmedian(finite))
+    noise = _robust_sky_std(finite)
+    if not np.isfinite(noise) or noise <= 0:
+        noise = float(np.nanstd(finite)) if finite.size > 1 else 1.0
+    if not np.isfinite(noise) or noise <= 0:
+        noise = 1.0
+
+    signal = patch.astype(float) - sky
+    signal[~np.isfinite(signal)] = 0.0
+    signal[signal < 0.0] = 0.0
+    total = float(np.nansum(signal))
+    peak_signal = float(np.nanmax(signal)) if signal.size else math.nan
+    if not np.isfinite(total) or total <= 0 or not np.isfinite(peak_signal) or peak_signal <= 0:
+        return {"valid": 0.0}
+
+    yy, xx = np.indices(patch.shape)
+    xc = float(np.nansum((xx + x1) * signal) / total)
+    yc = float(np.nansum((yy + y1) * signal) / total)
+    dx = (xx + x1) - xc
+    dy = (yy + y1) - yc
+    var = float(np.nansum((dx * dx + dy * dy) * signal) / total)
+    sigma = math.sqrt(max(0.5 * var, 0.0))
+    fwhm = 2.355 * sigma if sigma > 0 else math.nan
+    effective_pixels = total / peak_signal
+
+    core_threshold = max(3.0 * noise, 0.20 * peak_signal)
+    core_pixels = int(np.sum(signal >= core_threshold))
+    flat = np.sort(signal[np.isfinite(signal)].ravel())
+    second_signal = float(flat[-2]) if flat.size >= 2 else 0.0
+    peak_ratio = peak_signal / max(second_signal, 1e-12)
+
+    return {
+        "valid": 1.0,
+        "fwhm": float(fwhm),
+        "effective_pixels": float(effective_pixels),
+        "core_pixels": float(core_pixels),
+        "peak_ratio": float(peak_ratio),
+    }
+
+
+def _is_star_like_candidate(image: Optional[np.ndarray], x: float, y: float, aperture_radius: float) -> bool:
+    """Return True if an automatic candidate is broad enough to be stellar.
+
+    The thresholds are deliberately conservative: they reject single/few-pixel
+    spikes while retaining slightly undersampled stellar images.  Manual target
+    selection and manual comparison selection are not affected.
+    """
+    metrics = _candidate_shape_metrics(image, x, y, aperture_radius)
+    if metrics.get("valid", 0.0) < 0.5:
+        return False
+    fwhm = metrics.get("fwhm", math.nan)
+    effective_pixels = metrics.get("effective_pixels", math.nan)
+    core_pixels = metrics.get("core_pixels", 0.0)
+    peak_ratio = metrics.get("peak_ratio", math.nan)
+
+    if not np.isfinite(fwhm) or fwhm < 1.15 or fwhm > max(10.0, 2.5 * float(aperture_radius)):
+        return False
+    if not np.isfinite(effective_pixels) or effective_pixels < 2.2:
+        return False
+    if core_pixels < 3:
+        return False
+    if np.isfinite(peak_ratio) and peak_ratio > 8.0 and core_pixels <= 4:
+        return False
+    return True
 
 
 
@@ -628,6 +744,8 @@ def _auto_find_comparison_stars(window: sg.Window, session: PhotometrySession, v
         _pixel, peak, _mean = _aperture_stats_at(image, cx, cy, aperture_radius)
         if _peak_quality_from_value(peak, values) != "ok":
             continue
+        if not _is_star_like_candidate(image, cx, cy, aperture_radius):
+            continue
 
         nearest = min(_distance_to_positions(cx, cy, existing_positions), _distance_to_positions(cx, cy, provisional_positions))
         if not np.isfinite(nearest):
@@ -672,6 +790,9 @@ def _auto_find_comparison_stars(window: sg.Window, session: PhotometrySession, v
                 x, y = _centroid_near(sample_image, x, y, search_radius)
             _pixel, peak, _mean = _aperture_stats_at(sample_image, x, y, aperture_radius)
             if not np.isfinite(peak):
+                valid_candidate[cand_idx] = False
+                continue
+            if not _is_star_like_candidate(sample_image, x, y, aperture_radius):
                 valid_candidate[cand_idx] = False
                 continue
             peaks_by_candidate[cand_idx].append(float(peak))
@@ -2009,6 +2130,7 @@ def run_aperture_photometry_tool(parent_window: Optional[sg.Window] = None) -> O
         icon=icon_path,
     )
     center_window(window)
+    apply_preferences_to_window(window, "aperture_photometry", APERTURE_PHOTOMETRY_PREFERENCE_KEYS)
     return_path: Optional[str] = None
 
     #Handling windows peculiarities: DPI awareness and mouse over buttons
@@ -2191,6 +2313,7 @@ def run_aperture_photometry_tool(parent_window: Optional[sg.Window] = None) -> O
                 sg.popup_error(str(exc))
 
     finally:
+        _save_photometry_preferences(window)
         try:
             _delete_photometry_figure(session)
         except Exception:

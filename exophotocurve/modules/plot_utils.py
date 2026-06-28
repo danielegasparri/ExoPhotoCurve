@@ -243,9 +243,107 @@ def _resolve_fractional_time_from_axis(x_values: np.ndarray, fraction_value: obj
     return float(integer_part + float(fraction))
 
 
+def _interp_extrapolate(value: float, src: np.ndarray, dst: np.ndarray) -> float:
+    """Map *value* from one monotonic time column to another.
+
+    The transit fit is evaluated in BJD_TDB, but the user may keep the plot in
+    JD_UTC or another original time column.  Timing markers therefore need a
+    point-by-point time-system mapping instead of simply reusing the BJD value
+    on the visible axis.
+    """
+    src = np.asarray(src, dtype=float)
+    dst = np.asarray(dst, dtype=float)
+    valid = np.isfinite(src) & np.isfinite(dst)
+    if np.count_nonzero(valid) < 2 or not np.isfinite(value):
+        return float(value)
+
+    src_valid = src[valid]
+    dst_valid = dst[valid]
+    order = np.argsort(src_valid)
+    src_sorted = src_valid[order]
+    dst_sorted = dst_valid[order]
+
+    unique_src, unique_idx = np.unique(src_sorted, return_index=True)
+    unique_dst = dst_sorted[unique_idx]
+    if unique_src.size < 2:
+        return float(value)
+
+    if unique_src[0] <= value <= unique_src[-1]:
+        return float(np.interp(value, unique_src, unique_dst))
+
+    if value < unique_src[0]:
+        x0, x1 = unique_src[0], unique_src[1]
+        y0, y1 = unique_dst[0], unique_dst[1]
+    else:
+        x0, x1 = unique_src[-2], unique_src[-1]
+        y0, y1 = unique_dst[-2], unique_dst[-1]
+
+    if not np.isfinite(x1 - x0) or abs(x1 - x0) < 1.0e-12:
+        return float(value)
+    return float(y0 + (value - x0) * (y1 - y0) / (x1 - x0))
+
+
+def _map_bjd_marker_to_visible_time(df: pd.DataFrame, bjd_time: float, x_col: str) -> float:
+    """Return the visible-axis time for a marker stored in BJD_TDB."""
+    if not np.isfinite(bjd_time):
+        return float("nan")
+    if x_col == "PhotoCurve_time_corrected":
+        return float(bjd_time)
+    if "PhotoCurve_time_corrected" not in df.columns or x_col not in df.columns:
+        return float(bjd_time)
+
+    corrected = to_numeric_array(df, "PhotoCurve_time_corrected")
+    visible = to_numeric_array(df, x_col)
+    if corrected is None or visible is None:
+        return float(bjd_time)
+    return _interp_extrapolate(float(bjd_time), corrected, visible)
+
+
+def _resolve_meridian_flip_time_for_visible_axis(
+    df: pd.DataFrame,
+    x_raw: np.ndarray,
+    x_col: str,
+    fraction_value: object,
+) -> tuple[float, float]:
+    """Resolve the meridian-flip time for the current visible X column.
+
+    The user-entered fraction is an observing-time fraction, normally JD_UTC.
+    If the visible axis is later changed explicitly to BJD_TDB, the marker is
+    mapped with the stored PhotoCurve_time_input -> PhotoCurve_time_corrected
+    relation.  The returned tuple is ``(visible_time, input_time)``.
+    """
+    if "PhotoCurve_time_input" in df.columns:
+        input_time_arr = to_numeric_array(df, "PhotoCurve_time_input")
+        if input_time_arr is None:
+            input_time_arr = np.asarray(x_raw, dtype=float)
+    else:
+        input_time_arr = np.asarray(x_raw, dtype=float)
+
+    input_time = _resolve_fractional_time_from_axis(input_time_arr, fraction_value)
+    if not np.isfinite(input_time):
+        return float("nan"), float("nan")
+
+    if x_col == "PhotoCurve_time_input":
+        return float(input_time), float(input_time)
+
+    if x_col == "PhotoCurve_time_corrected" and "PhotoCurve_time_corrected" in df.columns:
+        corrected = to_numeric_array(df, "PhotoCurve_time_corrected")
+        if corrected is not None:
+            return _interp_extrapolate(float(input_time), input_time_arr, corrected), float(input_time)
+
+    if x_col in df.columns and x_col != "PhotoCurve_time_input":
+        visible = to_numeric_array(df, x_col)
+        if visible is not None and input_time_arr.shape == visible.shape:
+            return _interp_extrapolate(float(input_time), input_time_arr, visible), float(input_time)
+
+    return float(input_time), float(input_time)
+
+
 def add_meridian_flip_marker(
     ax: plt.Axes,
+    df: pd.DataFrame,
     x_raw: np.ndarray,
+    x_col: str,
     values: Dict[str, object],
     x_offset: float,
 ) -> None:
@@ -255,16 +353,21 @@ def add_meridian_flip_marker(
     if not bool(values.get("-DET_SHOW_FLIP_MARKER-", True)):
         return
 
-    flip_time = _resolve_fractional_time_from_axis(x_raw, values.get("-DET_FLIP_FRAC-", ""))
-    if not np.isfinite(flip_time):
+    flip_time_visible, flip_time_input = _resolve_meridian_flip_time_for_visible_axis(
+        df,
+        x_raw,
+        x_col,
+        values.get("-DET_FLIP_FRAC-", ""),
+    )
+    if not np.isfinite(flip_time_visible):
         return
 
     x_mode = str(values.get("-XMODE-", "Raw X"))
-    x_value = transform_time_marker(flip_time, x_mode, x_offset)
+    x_value = transform_time_marker(flip_time_visible, x_mode, x_offset)
     if not np.isfinite(x_value):
         return
 
-    frac = flip_time - np.floor(flip_time)
+    frac = flip_time_input - np.floor(flip_time_input) if np.isfinite(flip_time_input) else flip_time_visible - np.floor(flip_time_visible)
     draw_timing_marker(
         ax,
         x_value,
@@ -275,10 +378,13 @@ def add_meridian_flip_marker(
         alpha=0.55,
         linewidth=0.9,
     )
+
+
 def add_transit_timing_markers(
     ax: plt.Axes,
     df: pd.DataFrame,
     values: Dict[str, object],
+    x_col: str,
     x_offset: float,
     expected_colour: str,
     calculated_colour: str,
@@ -323,8 +429,10 @@ def add_transit_timing_markers(
         "Calculated end": first_finite_column_value(df, "PhotoCurve_calculated_end_time"),
     }
 
-    predicted_x = {name: transform_time_marker(value, x_mode, x_offset) for name, value in predicted.items()}
-    calculated_x = {name: transform_time_marker(value, x_mode, x_offset) for name, value in calculated.items()}
+    predicted_visible = {name: _map_bjd_marker_to_visible_time(df, value, x_col) for name, value in predicted.items()}
+    calculated_visible = {name: _map_bjd_marker_to_visible_time(df, value, x_col) for name, value in calculated.items()}
+    predicted_x = {name: transform_time_marker(value, x_mode, x_offset) for name, value in predicted_visible.items()}
+    calculated_x = {name: transform_time_marker(value, x_mode, x_offset) for name, value in calculated_visible.items()}
 
     if show_predicted:
         for name, linestyle, y_text, lw, alpha in [
@@ -566,11 +674,12 @@ def build_plot(df: pd.DataFrame, values: Dict[str, object]) -> plt.Figure:
         ax_lc,
         df,
         values,
+        x_col,
         x_offset,
         expected_model_colour,
         model_colour,
     )
-    add_meridian_flip_marker(ax_lc, x, values, x_offset)
+    add_meridian_flip_marker(ax_lc, df, x, x_col, values, x_offset)
 
     if bool(values.get("-BIN_ACTIVE-", False)):
         bin_n = max(1, parse_int(values.get("-BIN_N-", 4), 4))

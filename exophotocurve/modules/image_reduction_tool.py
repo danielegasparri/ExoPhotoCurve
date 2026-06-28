@@ -22,6 +22,7 @@ import math
 import os
 import shutil
 import traceback
+import threading
 
 import numpy as np
 import pandas as pd
@@ -29,6 +30,7 @@ import pandas as pd
 from .numeric_utils import parse_float, parse_int
 from .sg_loader import sg
 from . import misc
+from .user_preferences import apply_preferences_to_window, save_window_preferences
 
 try:  # pragma: no cover - optional import checked at runtime
     from astropy.io import fits
@@ -44,6 +46,28 @@ except Exception:  # pragma: no cover
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 icon_path = os.path.join(BASE_DIR, "ExoPhotoCurve.ico")
+
+# Whitelisted preferences for the image-reduction tool.  These are stable
+# user defaults, not a record of a particular reduction.  Reference-file and
+# log/progress state are intentionally not persisted.
+IMAGE_REDUCTION_PREFERENCE_KEYS = [
+    "-RED_SCI_PATTERN-", "-RED_BIAS_PATTERN-", "-RED_DARK_PATTERN-",
+    "-RED_FLAT_PATTERN-", "-RED_DARKFLAT_PATTERN-", "-RED_OUTPUT_FOLDER-",
+    "-RED_COMBINE-", "-RED_SIGMA-", "-RED_DARK_SCALING-", "-RED_EXPTIME_KEYS-",
+    "-RED_REUSE_MASTERS-", "-RED_MASTER_FOLDER-", "-RED_REUSE_BIAS-",
+    "-RED_REUSE_DARK-", "-RED_REUSE_DARKFLAT-", "-RED_REUSE_FLAT-",
+    "-RED_CAMERA-", "-RED_BAYER_PATTERN-", "-RED_BAYER_CHANNEL-",
+    "-RED_ALIGN-", "-RED_REFERENCE_MODE-", "-RED_TRANSFORM-", "-RED_INTERP-",
+    "-RED_DETECT_SIGMA-", "-RED_MAX_STARS-", "-RED_MATCH_TOL-",
+    "-RED_CROP_COMMON-",
+]
+
+
+def _save_reduction_preferences(window: sg.Window) -> None:
+    try:
+        save_window_preferences(window, "image_reduction", IMAGE_REDUCTION_PREFERENCE_KEYS)
+    except Exception:
+        pass
 
 
 @dataclass
@@ -179,6 +203,28 @@ class ReductionResult:
 
 
 ProgressCallback = Optional[Callable[[str, Optional[int]], None]]
+
+
+class ReductionCancelled(RuntimeError):
+    """Raised when the user stops an image-reduction run."""
+
+
+class CancellationToken:
+    """Small thread-safe cancellation flag for long reduction runs."""
+
+    def __init__(self) -> None:
+        self._event = threading.Event()
+
+    def cancel(self) -> None:
+        self._event.set()
+
+    def is_cancelled(self) -> bool:
+        return self._event.is_set()
+
+
+def _check_cancel(cancel_token: Optional[CancellationToken]) -> None:
+    if cancel_token is not None and cancel_token.is_cancelled():
+        raise ReductionCancelled("Image reduction stopped by user.")
 
 
 # ---------------------------------------------------------------------------
@@ -331,7 +377,14 @@ def _sigma_clip_stack(stack: np.ndarray, sigma: float) -> np.ndarray:
     return clipped
 
 
-def _combine_images(files: Sequence[str], method: str, sigma: float, progress: ProgressCallback = None, label: str = "frames") -> Tuple[np.ndarray, object, List[Dict[str, object]]]:
+def _combine_images(
+    files: Sequence[str],
+    method: str,
+    sigma: float,
+    progress: ProgressCallback = None,
+    label: str = "frames",
+    cancel_token: Optional[CancellationToken] = None,
+) -> Tuple[np.ndarray, object, List[Dict[str, object]]]:
     if not files:
         raise ValueError(f"No {label} were selected.")
     arrays: List[np.ndarray] = []
@@ -808,6 +861,44 @@ def _centroid_patch(image: np.ndarray, x0: int, y0: int, radius: int, sky: float
     return xc, yc, total, peak, fwhm, elong
 
 
+def _star_patch_is_extended(image: np.ndarray, x0: int, y0: int, radius: int, sky: float, noise: float) -> bool:
+    """Reject single/few-pixel spikes before using detections for alignment.
+
+    Hot pixels and cosmic-ray residuals are local maxima but have too little
+    spatial extent to be reliable registration sources.  This conservative
+    check keeps detections whose flux is distributed over multiple pixels.
+    """
+    ny, nx = image.shape
+    x1 = max(0, x0 - radius)
+    x2 = min(nx, x0 + radius + 1)
+    y1 = max(0, y0 - radius)
+    y2 = min(ny, y0 + radius + 1)
+    patch = np.asarray(image[y1:y2, x1:x2], dtype=float)
+    if patch.size < 9 or not np.isfinite(patch).any():
+        return False
+    signal = patch - float(sky)
+    signal[~np.isfinite(signal)] = 0.0
+    signal[signal < 0.0] = 0.0
+    total = float(np.nansum(signal))
+    peak_signal = float(np.nanmax(signal)) if signal.size else math.nan
+    if not np.isfinite(total) or total <= 0 or not np.isfinite(peak_signal) or peak_signal <= 0:
+        return False
+    effective_pixels = total / peak_signal
+    local_noise = float(noise) if np.isfinite(noise) and noise > 0 else 1.0
+    core_threshold = max(3.0 * local_noise, 0.20 * peak_signal)
+    core_pixels = int(np.sum(signal >= core_threshold))
+    flat = np.sort(signal[np.isfinite(signal)].ravel())
+    second_signal = float(flat[-2]) if flat.size >= 2 else 0.0
+    peak_ratio = peak_signal / max(second_signal, 1e-12)
+    if effective_pixels < 2.2:
+        return False
+    if core_pixels < 3:
+        return False
+    if peak_ratio > 8.0 and core_pixels <= 4:
+        return False
+    return True
+
+
 def detect_stars(image: np.ndarray, sigma: float = 6.0, max_stars: int = 120) -> StarDetection:
     """Detect relatively isolated stars with conservative local maxima.
 
@@ -853,11 +944,13 @@ def detect_stars(image: np.ndarray, sigma: float = 6.0, max_stars: int = 120) ->
             dist2 = (np.asarray(xs) - x0) ** 2 + (np.asarray(ys) - y0) ** 2
             if np.nanmin(dist2) < min_sep2:
                 continue
+        if not _star_patch_is_extended(arr, x0, y0, radius=5, sky=sky, noise=noise):
+            continue
         result = _centroid_patch(arr, x0, y0, radius=5, sky=sky)
         if result is None:
             continue
         xc, yc, flux, peak, fwhm, elong = result
-        if not np.isfinite(fwhm) or fwhm < 1.0 or fwhm > 20.0:
+        if not np.isfinite(fwhm) or fwhm < 1.15 or fwhm > 20.0:
             continue
         if np.isfinite(elong) and elong > 5.0:
             continue
@@ -1338,12 +1431,13 @@ def _calibrate_one(
     return img
 
 
-def reduce_sequence(settings: ReductionSettings, progress: ProgressCallback = None) -> ReductionResult:
+def reduce_sequence(settings: ReductionSettings, progress: ProgressCallback = None, cancel_token: Optional[CancellationToken] = None) -> ReductionResult:
     """Run calibration and optional alignment on a FITS sequence."""
     if fits is None:
         raise RuntimeError("Astropy is required for FITS reduction. Install it with: pip install astropy")
     if ndimage is None or cKDTree is None:
         raise RuntimeError("scipy is required for image alignment and diagnostics. Install it with: pip install scipy")
+    _check_cancel(cancel_token)
 
     science_files = _list_fits(settings.science_folder, settings.science_pattern)
     if not science_files:
@@ -1401,7 +1495,7 @@ def reduce_sequence(settings: ReductionSettings, progress: ProgressCallback = No
     if master_bias is None:
         if bias_files:
             _log(progress, f"Combining {len(bias_files)} bias frame(s)...", 5)
-            master_bias, hdr, _rows = _combine_images(bias_files, settings.combine_method, settings.sigma_clip, progress, "bias frames")
+            master_bias, hdr, _rows = _combine_images(bias_files, settings.combine_method, settings.sigma_clip, progress, "bias frames", cancel_token)
             master_headers["bias"] = hdr
             _save_master(masters_dir / "master_bias.fits", master_bias, hdr, "master_bias", settings.overwrite)
         else:
@@ -1432,7 +1526,7 @@ def reduce_sequence(settings: ReductionSettings, progress: ProgressCallback = No
     if master_dark_raw is None:
         if dark_files:
             _log(progress, f"Combining {len(dark_files)} dark frame(s)...", 12)
-            master_dark_raw, hdr, _rows = _combine_images(dark_files, settings.combine_method, settings.sigma_clip, progress, "dark frames")
+            master_dark_raw, hdr, _rows = _combine_images(dark_files, settings.combine_method, settings.sigma_clip, progress, "dark frames", cancel_token)
             master_headers["dark"] = hdr
             _save_master(masters_dir / "master_dark_raw.fits", master_dark_raw, hdr, "master_dark_raw", settings.overwrite)
             if master_bias is not None:
@@ -1465,7 +1559,7 @@ def reduce_sequence(settings: ReductionSettings, progress: ProgressCallback = No
     if master_darkflat is None:
         if darkflat_files:
             _log(progress, f"Combining {len(darkflat_files)} dark-flat frame(s)...", 20)
-            master_darkflat, hdr, _rows = _combine_images(darkflat_files, settings.combine_method, settings.sigma_clip, progress, "dark-flat frames")
+            master_darkflat, hdr, _rows = _combine_images(darkflat_files, settings.combine_method, settings.sigma_clip, progress, "dark-flat frames", cancel_token)
             master_headers["darkflat"] = hdr
             _save_master(masters_dir / "master_darkflat.fits", master_darkflat, hdr, "master_darkflat", settings.overwrite)
             if bias_files or "bias" in reused_master_files:
@@ -1495,7 +1589,7 @@ def reduce_sequence(settings: ReductionSettings, progress: ProgressCallback = No
     if master_flat_norm is None:
         if flat_files:
             _log(progress, f"Combining {len(flat_files)} flat frame(s)...", 25)
-            master_flat_raw, hdr, _rows = _combine_images(flat_files, settings.combine_method, settings.sigma_clip, progress, "flat frames")
+            master_flat_raw, hdr, _rows = _combine_images(flat_files, settings.combine_method, settings.sigma_clip, progress, "flat frames", cancel_token)
             master_headers["flat"] = hdr
             if master_darkflat is not None:
                 master_flat_cal = master_flat_raw - master_darkflat
@@ -1689,6 +1783,7 @@ def reduce_sequence(settings: ReductionSettings, progress: ProgressCallback = No
         with open(reports_dir / "reduction_warnings.txt", "w", encoding="utf-8") as f:
             f.write("\n".join(warnings) + "\n")
 
+    _check_cancel(cancel_token)
     _log(progress, "Reduction completed.", 100)
     return ReductionResult(
         output_root=str(root),
@@ -1807,11 +1902,12 @@ def _make_reduction_layout() -> List[List[sg.Element]]:
     run_frame = [
         [
             sg.Button("Run reduction", key="-RED_RUN-", button_color=("white", "#2d6cdf")),
+            sg.Button("Stop", key="-RED_STOP-", disabled=True, button_color=("white", "#b00020")),
             sg.Button("Close"),
             sg.Text("Status:"),
             sg.Text("Ready.", key="-RED_STATUS-", size=(58, 1)),
         ],
-        [sg.ProgressBar(100, orientation="h", size=(72, 14), key="-RED_PROGRESS-")],
+        [sg.ProgressBar(100, orientation="h", size=(61, 14), key="-RED_PROGRESS-")],
         [sg.Multiline("", key="-RED_LOG-", size=(86, 14), disabled=True, autoscroll=True)],
     ]
 
@@ -1983,6 +2079,7 @@ def run_image_reduction_tool(parent_window: Optional[sg.Window] = None) -> Optio
         modal=True,
     )
     center_window(window)
+    apply_preferences_to_window(window, "image_reduction", IMAGE_REDUCTION_PREFERENCE_KEYS)
     try:
         window.TKroot.update_idletasks()
         screen_w = window.TKroot.winfo_screenwidth()
@@ -1995,22 +2092,58 @@ def run_image_reduction_tool(parent_window: Optional[sg.Window] = None) -> Optio
     except Exception:
         pass
 
-    _set_bayer_controls_state(window, "Mono")
-    _set_master_reuse_controls_state(window, False)
+    try:
+        _set_bayer_controls_state(window, str(window["-RED_CAMERA-"].get()))
+    except Exception:
+        _set_bayer_controls_state(window, "Mono")
+    try:
+        _set_master_reuse_controls_state(window, bool(window["-RED_REUSE_MASTERS-"].get()))
+    except Exception:
+        _set_master_reuse_controls_state(window, False)
     _make_child_window_modal(window, parent_window)
 
     last_result: Optional[ReductionResult] = None
+    reduction_running = False
+    cancel_token: Optional[CancellationToken] = None
+
+    def set_running_state(running: bool) -> None:
+        """Enable/disable controls while a reduction worker is active."""
+        try:
+            window["-RED_RUN-"].update(disabled=running)
+            window["-RED_STOP-"].update(disabled=not running)
+            window["Close"].update(disabled=running)
+        except Exception:
+            pass
 
     def gui_progress(message: str, percent: Optional[int] = None) -> None:
+        """Thread-safe progress callback used by the reduction worker."""
+        try:
+            if cancel_token is not None and cancel_token.is_cancelled():
+                raise ReductionCancelled("Image reduction stopped by user.")
+            window.write_event_value("-RED_THREAD_PROGRESS-", (str(message), percent))
+        except ReductionCancelled:
+            raise
+        except Exception:
+            pass
+
+    def handle_progress(message: str, percent: Optional[int] = None) -> None:
         try:
             old = window["-RED_LOG-"].get()
             window["-RED_LOG-"].update(old + str(message) + "\n")
             window["-RED_STATUS-"].update(str(message)[:80])
             if percent is not None:
                 window["-RED_PROGRESS-"].update(max(0, min(100, int(percent))))
-            window.refresh()
         except Exception:
             pass
+
+    def reduction_worker(settings: ReductionSettings, token: CancellationToken) -> None:
+        try:
+            result = reduce_sequence(settings, progress=gui_progress, cancel_token=token)
+            window.write_event_value("-RED_THREAD_DONE-", result)
+        except ReductionCancelled as exc:
+            window.write_event_value("-RED_THREAD_CANCELLED-", str(exc))
+        except Exception:
+            window.write_event_value("-RED_THREAD_ERROR-", traceback.format_exc(limit=8))
 
 
     #Handling windows peculiarities: DPI awareness and mouse over buttons
@@ -2031,7 +2164,61 @@ def run_image_reduction_tool(parent_window: Optional[sg.Window] = None) -> Optio
         while True:
             event, values = window.read()
             if event in (sg.WINDOW_CLOSED, "Close"):
+                if reduction_running:
+                    if cancel_token is not None:
+                        cancel_token.cancel()
+                    handle_progress("Stop requested. Waiting for the current safe checkpoint before closing...", None)
+                    continue
                 break
+            if event == "-RED_THREAD_PROGRESS-":
+                message, percent = values.get("-RED_THREAD_PROGRESS-", ("", None))
+                handle_progress(str(message), percent)
+                continue
+            if event == "-RED_THREAD_DONE-":
+                reduction_running = False
+                cancel_token = None
+                set_running_state(False)
+                last_result = values.get("-RED_THREAD_DONE-")
+                handle_progress("Reduction completed.", 100)
+                if last_result is not None:
+                    msg = (
+                        "Reduction completed.\n\n"
+                        f"Science frames: {last_result.n_science}\n"
+                        f"Calibrated frames: {last_result.n_calibrated}\n"
+                        f"Final/aligned frames: {last_result.n_aligned}\n\n"
+                        f"Final sequence folder:\n{last_result.aligned_folder}\n\n"
+                        f"Report:\n{last_result.report_path}"
+                    )
+                    sg.popup_ok(msg, title="ExoPhotoCurve reduction completed")
+                    if parent_window is not None:
+                        try:
+                            parent_window["-STATUS-"].update(f"Reduced sequence ready: {last_result.aligned_folder}")
+                        except Exception:
+                            pass
+                continue
+            if event == "-RED_THREAD_CANCELLED-":
+                reduction_running = False
+                cancel_token = None
+                set_running_state(False)
+                handle_progress(str(values.get("-RED_THREAD_CANCELLED-", "Reduction stopped by user.")), None)
+                window["-RED_STATUS-"].update("Reduction stopped.")
+                continue
+            if event == "-RED_THREAD_ERROR-":
+                reduction_running = False
+                cancel_token = None
+                set_running_state(False)
+                tb = str(values.get("-RED_THREAD_ERROR-", ""))
+                window["-RED_LOG-"].update(window["-RED_LOG-"].get() + "\nERROR:\n" + tb + "\n")
+                sg.popup_error("Reduction failed. See the reduction log for details.")
+                continue
+            if event == "-RED_STOP-":
+                if reduction_running and cancel_token is not None:
+                    cancel_token.cancel()
+                    window["-RED_STOP-"].update(disabled=True)
+                    handle_progress("Stop requested. The reduction will stop at the next safe checkpoint...", None)
+                continue
+            if reduction_running:
+                continue
             if event == "-RED_CAMERA-":
                 _set_bayer_controls_state(window, values.get("-RED_CAMERA-", "Mono"))
                 continue
@@ -2061,33 +2248,21 @@ def run_image_reduction_tool(parent_window: Optional[sg.Window] = None) -> Optio
                         continue
                     window["-RED_LOG-"].update("")
                     window["-RED_PROGRESS-"].update(0)
-                    gui_progress("Starting reduction...", 0)
-                    window["-RED_RUN-"].update(disabled=True)
-                    last_result = reduce_sequence(settings, progress=gui_progress)
-                    window["-RED_RUN-"].update(disabled=False)
-                    msg = (
-                        "Reduction completed.\n\n"
-                        f"Science frames: {last_result.n_science}\n"
-                        f"Calibrated frames: {last_result.n_calibrated}\n"
-                        f"Final/aligned frames: {last_result.n_aligned}\n\n"
-                        f"Final sequence folder:\n{last_result.aligned_folder}\n\n"
-                        f"Report:\n{last_result.report_path}"
-                    )
-                    sg.popup_ok(msg, title="ExoPhotoCurve reduction completed")
-                    if parent_window is not None:
-                        try:
-                            parent_window["-STATUS-"].update(f"Reduced sequence ready: {last_result.aligned_folder}")
-                        except Exception:
-                            pass
+                    handle_progress("Starting reduction...", 0)
+                    cancel_token = CancellationToken()
+                    reduction_running = True
+                    set_running_state(True)
+                    threading.Thread(target=reduction_worker, args=(settings, cancel_token), daemon=True).start()
                 except Exception as exc:
-                    try:
-                        window["-RED_RUN-"].update(disabled=False)
-                    except Exception:
-                        pass
+                    reduction_running = False
+                    cancel_token = None
+                    set_running_state(False)
                     tb = traceback.format_exc(limit=5)
                     window["-RED_LOG-"].update(window["-RED_LOG-"].get() + "\nERROR:\n" + tb + "\n")
                     sg.popup_error(f"Reduction failed:\n{exc}")
     finally:
+        if not reduction_running:
+            _save_reduction_preferences(window)
         try:
             window.TKroot.grab_release()
         except Exception:
